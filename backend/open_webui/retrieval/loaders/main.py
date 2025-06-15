@@ -16,6 +16,7 @@ from langchain_community.document_loaders import (
     UnstructuredMarkdownLoader,
     UnstructuredPowerPointLoader,
     UnstructuredRSTLoader,
+    UnstructuredWordDocumentLoader,
     UnstructuredXMLLoader,
     YoutubeLoader,
 )
@@ -241,7 +242,10 @@ class Loader:
                 api_key=self.kwargs.get("MISTRAL_OCR_API_KEY"), file_path=file_path
             )
         else:
-            if file_ext == "pdf":
+            if file_ext == "doc" or file_content_type == "application/msword":
+                # Support du format DOC legacy via Unstructured
+                loader = UnstructuredWordDocumentLoader(file_path)
+            elif file_ext == "pdf":
                 loader = PyPDFLoader(
                     file_path, extract_images=self.kwargs.get("PDF_EXTRACT_IMAGES")
                 )
@@ -278,6 +282,13 @@ class Loader:
             elif self._is_text_file(file_ext, file_content_type):
                 loader = TextLoader(file_path, autodetect_encoding=True)
             else:
-                loader = TextLoader(file_path, autodetect_encoding=True)
+                # Gestion explicite des formats non supportés
+                if file_ext in ["png", "jpg", "jpeg", "gif", "bmp", "tiff"]:
+                    raise ValueError(f"Image format '{file_ext}' requires OCR engine (Tika/Docling/Document Intelligence)")
+                elif file_ext in ["mp4", "avi", "mov", "mp3", "wav"]:
+                    raise ValueError(f"Media format '{file_ext}' not supported for text extraction")
+                else:
+                    # Fallback vers TextLoader pour formats texte inconnus
+                    loader = TextLoader(file_path, autodetect_encoding=True)
 
         return loader

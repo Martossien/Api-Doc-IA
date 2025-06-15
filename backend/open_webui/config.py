@@ -916,6 +916,79 @@ TOOL_SERVER_CONNECTIONS = PersistentConfig(
 )
 
 ####################################
+# API v2
+####################################
+
+def _calculate_api_v2_max_concurrent():
+    """Calculate safe concurrent limit based on available RAM"""
+    try:
+        import psutil
+        ram_gb = psutil.virtual_memory().total / (1024**3)
+        memory_per_file = 520  # MB per file processing (corrected from analysis)
+        available_ram = ram_gb * 1024 * 0.7  # 70% RAM available for processing
+        max_concurrent = max(1, int(available_ram / memory_per_file))
+        # Apply safety limits
+        if ram_gb >= 512:
+            return min(max_concurrent, 30)
+        elif ram_gb >= 32:
+            return min(max_concurrent, 6)
+        elif ram_gb >= 16:
+            return min(max_concurrent, 3)
+        else:
+            return 1
+    except ImportError:
+        # Fallback if psutil not available
+        return 3
+
+API_V2_ENABLED = PersistentConfig(
+    "API_V2_ENABLED",
+    "api_v2.enabled",
+    os.environ.get("API_V2_ENABLED", "True").lower() == "true",
+)
+
+API_V2_MAX_FILE_SIZE = PersistentConfig(
+    "API_V2_MAX_FILE_SIZE",
+    "api_v2.max_file_size",
+    int(os.environ.get("API_V2_MAX_FILE_SIZE", "52428800")),  # 50MB default
+)
+
+API_V2_MAX_CONCURRENT = PersistentConfig(
+    "API_V2_MAX_CONCURRENT",
+    "api_v2.max_concurrent",
+    int(os.environ.get("API_V2_MAX_CONCURRENT", str(_calculate_api_v2_max_concurrent()))),
+)
+
+API_V2_TIMEOUT = PersistentConfig(
+    "API_V2_TIMEOUT",
+    "api_v2.timeout",
+    int(os.environ.get("API_V2_TIMEOUT", "300")),  # 5 minutes default
+)
+
+API_V2_ADMIN_MODEL = PersistentConfig(
+    "API_V2_ADMIN_MODEL",
+    "api_v2.admin_model",
+    os.environ.get("API_V2_ADMIN_MODEL", "auto"),  # Changed to "auto" for automatic model selection
+)
+
+API_V2_ADMIN_CONFIG = PersistentConfig(
+    "API_V2_ADMIN_CONFIG",
+    "api_v2.admin_config",
+    {
+        "temperature": 0.7,
+        "max_tokens": 8000,
+        "enable_vision": True,
+        "enable_multimodal": True,
+        "default_prompt_template": "Analyze the provided document and answer: {prompt}",
+        "supported_formats": ["pdf", "docx", "txt", "md", "png", "jpg", "jpeg", "gif"],
+        "memory_management": {
+            "cleanup_after_processing": True,
+            "monitor_usage": True,
+            "emergency_stop_threshold": 95
+        }
+    },
+)
+
+####################################
 # WEBUI
 ####################################
 

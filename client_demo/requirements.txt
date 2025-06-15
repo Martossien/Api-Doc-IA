@@ -1,0 +1,15 @@
+# Api-Doc-IA Demo Client - Dépendances Python
+# Compatible avec toutes versions urllib3 (gestion automatique dans le code)
+
+# Dépendances principales
+requests>=2.25.1
+urllib3>=1.21.1
+
+# Optionnel pour améliorer les performances SSL
+certifi>=2021.5.25
+
+# Packaging (pour build)
+pyinstaller>=4.5.1
+
+# Note: tkinter et configparser sont inclus dans Python standard
+# urllib3 : compatible toutes versions (1.25.x et 1.26.x+) via détection automatique

@@ -76,6 +76,7 @@ from open_webui.routers import (
     tools,
     users,
     utils,
+    api_v2,
 )
 
 from open_webui.routers.retrieval import (
@@ -393,6 +394,9 @@ log.setLevel(SRC_LOG_LEVELS["MAIN"])
 
 class SPAStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
+        # API routes are now handled BEFORE this mount, so no need to exclude them
+        # This mount should only handle frontend static files and SPA fallback
+        
         try:
             return await super().get_response(path, scope)
         except (HTTPException, StarletteHTTPException) as ex:
@@ -443,6 +447,39 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+
+# API App séparée pour résoudre problème SPAStaticFiles
+api_app = FastAPI(
+    title="Open WebUI API",
+    description="API for Open WebUI - All /api/* routes",
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# Middleware pour API v2
+@api_app.middleware("http")
+async def api_v2_middleware(request: Request, call_next):
+    """Middleware pour toutes les routes API"""
+    start_time = time.time()
+    
+    try:
+        response = await call_next(request)
+        
+        # Add processing time header
+        process_time = time.time() - start_time
+        response.headers["X-Process-Time"] = str(process_time)
+        response.headers["X-API-Version"] = "2.0"
+        
+        return response
+        
+    except Exception as e:
+        log.error(f"API middleware error: {e}")
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error"}
+        )
 
 oauth_manager = OAuthManager(app)
 
@@ -893,6 +930,25 @@ async def commit_session_after_request(request: Request, call_next):
 
 
 @app.middleware("http")
+async def api_content_type_fix(request: Request, call_next):
+    """Fix content-type headers for API routes that get polluted by SPAStaticFiles"""
+    response = await call_next(request)
+    
+    # Si c'est une route API, forcer application/json
+    if (request.url.path.startswith("/api/") or 
+        request.url.path.startswith("/test-api")):
+        
+        # Force application/json pour toutes les routes API
+        response.headers["content-type"] = "application/json"
+        
+        # Nettoyer les headers de static files
+        for header in ["etag", "last-modified", "accept-ranges"]:
+            if header in response.headers:
+                del response.headers[header]
+    
+    return response
+
+@app.middleware("http")
 async def check_url(request: Request, call_next):
     start_time = int(time.time())
     request.state.token = get_http_authorization_cred(
@@ -924,6 +980,19 @@ async def inspect_websocket(request: Request, call_next):
     return await call_next(request)
 
 
+# API Intercept Middleware - AVANT CORS pour intercepter routes API
+class APIInterceptMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Si c'est une route API, on la traite normalement 
+        if request.url.path.startswith("/api/"):
+            # Laisser FastAPI traiter la route API normalement
+            return await call_next(request)
+        else:
+            # Pour toutes les autres routes, traitement normal
+            return await call_next(request)
+
+app.add_middleware(APIInterceptMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ALLOW_ORIGIN,
@@ -940,36 +1009,39 @@ app.include_router(ollama.router, prefix="/ollama", tags=["ollama"])
 app.include_router(openai.router, prefix="/openai", tags=["openai"])
 
 
-app.include_router(pipelines.router, prefix="/api/v1/pipelines", tags=["pipelines"])
-app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["tasks"])
-app.include_router(images.router, prefix="/api/v1/images", tags=["images"])
+api_app.include_router(pipelines.router, prefix="/v1/pipelines", tags=["pipelines"])
+api_app.include_router(tasks.router, prefix="/v1/tasks", tags=["tasks"])
+api_app.include_router(images.router, prefix="/v1/images", tags=["images"])
 
-app.include_router(audio.router, prefix="/api/v1/audio", tags=["audio"])
-app.include_router(retrieval.router, prefix="/api/v1/retrieval", tags=["retrieval"])
+api_app.include_router(audio.router, prefix="/v1/audio", tags=["audio"])
+api_app.include_router(retrieval.router, prefix="/v1/retrieval", tags=["retrieval"])
 
-app.include_router(configs.router, prefix="/api/v1/configs", tags=["configs"])
+api_app.include_router(configs.router, prefix="/v1/configs", tags=["configs"])
 
-app.include_router(auths.router, prefix="/api/v1/auths", tags=["auths"])
-app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
+api_app.include_router(auths.router, prefix="/v1/auths", tags=["auths"])
+api_app.include_router(users.router, prefix="/v1/users", tags=["users"])
 
 
-app.include_router(channels.router, prefix="/api/v1/channels", tags=["channels"])
-app.include_router(chats.router, prefix="/api/v1/chats", tags=["chats"])
+api_app.include_router(channels.router, prefix="/v1/channels", tags=["channels"])
+api_app.include_router(chats.router, prefix="/v1/chats", tags=["chats"])
 
-app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
-app.include_router(knowledge.router, prefix="/api/v1/knowledge", tags=["knowledge"])
-app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
-app.include_router(tools.router, prefix="/api/v1/tools", tags=["tools"])
+api_app.include_router(models.router, prefix="/v1/models", tags=["models"])
+api_app.include_router(knowledge.router, prefix="/v1/knowledge", tags=["knowledge"])
+api_app.include_router(prompts.router, prefix="/v1/prompts", tags=["prompts"])
+api_app.include_router(tools.router, prefix="/v1/tools", tags=["tools"])
 
-app.include_router(memories.router, prefix="/api/v1/memories", tags=["memories"])
-app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"])
-app.include_router(groups.router, prefix="/api/v1/groups", tags=["groups"])
-app.include_router(files.router, prefix="/api/v1/files", tags=["files"])
-app.include_router(functions.router, prefix="/api/v1/functions", tags=["functions"])
-app.include_router(
-    evaluations.router, prefix="/api/v1/evaluations", tags=["evaluations"]
+api_app.include_router(memories.router, prefix="/v1/memories", tags=["memories"])
+api_app.include_router(folders.router, prefix="/v1/folders", tags=["folders"])
+api_app.include_router(groups.router, prefix="/v1/groups", tags=["groups"])
+api_app.include_router(files.router, prefix="/v1/files", tags=["files"])
+api_app.include_router(functions.router, prefix="/v1/functions", tags=["functions"])
+api_app.include_router(
+    evaluations.router, prefix="/v1/evaluations", tags=["evaluations"]
 )
-app.include_router(utils.router, prefix="/api/v1/utils", tags=["utils"])
+api_app.include_router(utils.router, prefix="/v1/utils", tags=["utils"])
+
+# API v2 Router - migré vers api_app
+api_app.include_router(api_v2.router, prefix="/v2", tags=["api_v2"])
 
 
 try:
@@ -1499,8 +1571,40 @@ def swagger_ui_html(*args, **kwargs):
 
 applications.get_swagger_ui_html = swagger_ui_html
 
+# Migrer TOUS les routers AVANT la condition build (pour toujours les enregistrer)
+app.include_router(api_v2.router, prefix="/api/v2", tags=["api_v2"])
+app.include_router(pipelines.router, prefix="/api/v1/pipelines", tags=["pipelines"])
+app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["tasks"])
+app.include_router(images.router, prefix="/api/v1/images", tags=["images"])
+app.include_router(audio.router, prefix="/api/v1/audio", tags=["audio"])
+app.include_router(retrieval.router, prefix="/api/v1/retrieval", tags=["retrieval"])
+app.include_router(configs.router, prefix="/api/v1/configs", tags=["configs"])
+app.include_router(auths.router, prefix="/api/v1/auths", tags=["auths"])
+app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
+app.include_router(channels.router, prefix="/api/v1/channels", tags=["channels"])
+app.include_router(chats.router, prefix="/api/v1/chats", tags=["chats"])
+app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
+app.include_router(knowledge.router, prefix="/api/v1/knowledge", tags=["knowledge"])
+app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
+app.include_router(tools.router, prefix="/api/v1/tools", tags=["tools"])
+app.include_router(memories.router, prefix="/api/v1/memories", tags=["memories"])
+app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"])
+app.include_router(groups.router, prefix="/api/v1/groups", tags=["groups"])
+app.include_router(files.router, prefix="/api/v1/files", tags=["files"])
+app.include_router(functions.router, prefix="/api/v1/functions", tags=["functions"])
+app.include_router(evaluations.router, prefix="/api/v1/evaluations", tags=["evaluations"])
+app.include_router(utils.router, prefix="/api/v1/utils", tags=["utils"])
+
+# Route temporaire de test (AVANT condition build)
+@app.get("/test-api")
+async def test_api_working():
+    return {"message": "API routers working - SPAStaticFiles bypassed!"}
+
 if os.path.exists(FRONTEND_BUILD_DIR):
     mimetypes.add_type("text/javascript", ".js")
+    
+    # SPAStaticFiles réactivé avec middleware de correction des headers API
+    print("✅ FRONTEND ENABLED avec correction headers API")
     app.mount(
         "/",
         SPAStaticFiles(directory=FRONTEND_BUILD_DIR, html=True),

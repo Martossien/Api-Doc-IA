@@ -1,0 +1,11 @@
+[server]
+url = http://your-server-url
+token = your-api-key-here
+
+[app]
+timeout = 300
+retry_attempts = 3
+chunk_size = 1000
+max_tokens = 2000
+default_prompt = Résume ce document en 3 points clés
+

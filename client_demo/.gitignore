@@ -1,0 +1,36 @@
+# Configuration avec clés sensibles
+config.ini
+
+# Logs
+*.log
+demo_client.log
+phantom_*.log
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build PyInstaller
+build/
+dist/
+*.spec.backup
+
+# Environnement virtuel
+venv/
+env/
+
+# Fichiers temporaires
+*.tmp
+*.bak
+*.backup
+
+# Fichiers systèmes
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

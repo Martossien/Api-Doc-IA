@@ -1,0 +1,63 @@
+# =============================================================================
+# API-DOC-IA REQUIREMENTS
+# =============================================================================
+# Installation requirements for Api-Doc-IA project
+# This project is based on Open WebUI v0.6.5 with API v2 extensions
+
+# =============================================================================
+# PREFERRED INSTALLATION METHOD
+# =============================================================================
+# The project uses pyproject.toml for dependency management.
+# Install with: pip install .
+
+# =============================================================================
+# ALTERNATIVE: DIRECT REQUIREMENTS
+# =============================================================================
+# If you prefer to install dependencies directly:
+
+# Include backend requirements
+-r backend/requirements.txt
+
+# =============================================================================
+# API V2 SPECIFIC ADDITIONS
+# =============================================================================
+# Additional packages for API v2 functionality
+# (These may already be included in backend/requirements.txt)
+
+# Document processing enhancements
+python-magic>=0.4.27
+magic-filter>=0.1.2
+
+# Additional file format support
+python-docx>=1.1.0
+openpyxl>=3.1.0
+xlrd>=2.0.1
+
+# Enhanced OCR capabilities
+pytesseract>=0.3.10
+
+# API documentation generation
+pyyaml>=6.0.1
+jsonschema>=4.17.0
+
+# Development and testing (optional)
+# pytest>=7.4.0
+# black>=23.0.0
+# isort>=5.12.0
+
+# =============================================================================
+# PLATFORM SPECIFIC NOTES
+# =============================================================================
+# Linux: Install system packages first
+#   sudo apt-get install tesseract-ocr python3-magic libmagic1
+# 
+# macOS: Install with Homebrew
+#   brew install tesseract imagemagick libmagic
+#
+# Windows: Additional setup may be required for some packages
+
+# =============================================================================
+# CLIENT DEMO REQUIREMENTS (SEPARATE)
+# =============================================================================
+# The client_demo/ folder has its own requirements.txt
+# Install separately with: pip install -r client_demo/requirements.txt

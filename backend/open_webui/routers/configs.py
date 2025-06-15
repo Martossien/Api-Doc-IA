@@ -1,13 +1,27 @@
 from fastapi import APIRouter, Depends, Request, HTTPException
 from pydantic import BaseModel, ConfigDict
 
-from typing import Optional
+from typing import Optional, Dict, Any
+import time
+import logging
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.config import get_config, save_config
 from open_webui.config import BannerModel
 
 from open_webui.utils.tools import get_tool_server_data, get_tool_servers_data
+
+# Import API v2 configuration models
+from open_webui.api_v2.config_models import (
+    ApiV2AdminConfig,
+    ApiV2StatusResponse,
+    ApiV2ConfigUpdateRequest,
+    ApiV2ConfigBackup,
+    migrate_legacy_config,
+    export_config_to_legacy
+)
+
+log = logging.getLogger(__name__)
 
 
 router = APIRouter()
@@ -320,3 +334,285 @@ async def get_banners(
     user=Depends(get_verified_user),
 ):
     return request.app.state.config.BANNERS
+
+
+############################
+# API v2 Configuration
+############################
+
+@router.get("/api_v2/admin/config", response_model=ApiV2AdminConfig)
+async def get_api_v2_admin_config(request: Request, user=Depends(get_admin_user)):
+    """
+    Get current API v2 administration configuration.
+    
+    Returns:
+        ApiV2AdminConfig: Current structured configuration
+    """
+    try:
+        # Try to get current config from persistent storage first
+        from open_webui.config import API_V2_ADMIN_CONFIG
+        current_config = API_V2_ADMIN_CONFIG.value
+        
+        # If it's already structured, return it
+        if isinstance(current_config, dict) and "llm" in current_config:
+            return ApiV2AdminConfig(**current_config)
+        
+        # Otherwise migrate from legacy format or create default
+        if current_config:
+            migrated = migrate_legacy_config(current_config)
+        else:
+            # Create default config if none exists
+            migrated = ApiV2AdminConfig()
+        
+        # Save migrated/default config back to persistent storage
+        API_V2_ADMIN_CONFIG.value = migrated.dict()
+        API_V2_ADMIN_CONFIG.save()
+        
+        # Also update runtime config
+        request.app.state.config.API_V2_ADMIN_CONFIG = migrated.dict()
+        
+        log.info(f"Initialized API v2 config for user {user.id}")
+        return migrated
+        
+    except Exception as e:
+        log.error(f"Failed to get API v2 config: {e}")
+        # Return default config if all else fails
+        default_config = ApiV2AdminConfig()
+        try:
+            # Try to save default config
+            from open_webui.config import API_V2_ADMIN_CONFIG
+            API_V2_ADMIN_CONFIG.value = default_config.dict()
+            API_V2_ADMIN_CONFIG.save()
+            request.app.state.config.API_V2_ADMIN_CONFIG = default_config.dict()
+        except:
+            pass  # Ignore save errors during fallback
+        return default_config
+
+
+@router.post("/api_v2/admin/config", response_model=ApiV2AdminConfig)
+async def set_api_v2_admin_config(
+    request: Request, 
+    form_data: ApiV2ConfigUpdateRequest, 
+    user=Depends(get_admin_user)
+):
+    """
+    Update API v2 administration configuration.
+    
+    Args:
+        form_data: New configuration with optional reason
+        
+    Returns:
+        ApiV2AdminConfig: Updated configuration
+    """
+    try:
+        # Create backup if requested
+        if form_data.backup_current:
+            from open_webui.config import API_V2_ADMIN_CONFIG
+            current_config = API_V2_ADMIN_CONFIG.value
+            backup = ApiV2ConfigBackup(
+                config=current_config if isinstance(current_config, ApiV2AdminConfig) 
+                       else migrate_legacy_config(current_config),
+                timestamp=time.time(),
+                user_id=user.id,
+                version=getattr(current_config, 'version', '1.0.0'),
+                reason=f"Backup before update: {form_data.reason or 'No reason provided'}"
+            )
+            
+            # Store backup (you might want to implement a backup storage mechanism)
+            log.info(f"Created config backup for user {user.id}")
+        
+        # Update metadata
+        form_data.config.last_modified = time.time()
+        form_data.config.modified_by = user.id
+        
+        # Save to persistent storage - separate model and config
+        from open_webui.config import API_V2_ADMIN_MODEL, API_V2_ADMIN_CONFIG
+        
+        # Save the model separately if it's part of the config
+        if hasattr(form_data.config, 'admin_model') and form_data.config.admin_model:
+            API_V2_ADMIN_MODEL.value = form_data.config.admin_model
+            API_V2_ADMIN_MODEL.save()
+        
+        # Save the full config
+        API_V2_ADMIN_CONFIG.value = form_data.config.dict()
+        API_V2_ADMIN_CONFIG.save()
+        
+        # Audit log
+        log.info(f"API v2 config updated by user {user.id}. Reason: {form_data.reason or 'None'}")
+        
+        return form_data.config
+        
+    except Exception as e:
+        log.error(f"Failed to update API v2 config: {e}")
+        raise HTTPException(status_code=500, detail=f"Configuration update failed: {str(e)}")
+
+
+@router.post("/api_v2/admin/reset")
+async def reset_api_v2_admin_config(
+    request: Request, 
+    user=Depends(get_admin_user)
+):
+    """
+    Reset API v2 configuration to defaults.
+    
+    Returns:
+        ApiV2AdminConfig: Default configuration
+    """
+    try:
+        # Create backup before reset
+        current_config = request.app.state.config.API_V2_ADMIN_CONFIG
+        backup = ApiV2ConfigBackup(
+            config=current_config if isinstance(current_config, ApiV2AdminConfig) 
+                   else migrate_legacy_config(current_config),
+            timestamp=time.time(),
+            user_id=user.id,
+            version=getattr(current_config, 'version', '1.0.0'),
+            reason="Reset to defaults"
+        )
+        
+        # Create default config
+        default_config = ApiV2AdminConfig()
+        default_config.last_modified = time.time()
+        default_config.modified_by = user.id
+        
+        # Save to persistent storage
+        from open_webui.config import save_config_value
+        save_config_value("api_v2.admin_config", default_config.dict())
+        
+        # Update runtime config
+        request.app.state.config.API_V2_ADMIN_CONFIG = default_config.dict()
+        
+        log.info(f"API v2 config reset to defaults by user {user.id}")
+        
+        return {
+            "status": "success",
+            "message": "Configuration reset to defaults",
+            "config": default_config
+        }
+        
+    except Exception as e:
+        log.error(f"Failed to reset API v2 config: {e}")
+        raise HTTPException(status_code=500, detail=f"Configuration reset failed: {str(e)}")
+
+
+@router.get("/api_v2/admin/status", response_model=ApiV2StatusResponse)
+async def get_api_v2_status(request: Request, user=Depends(get_admin_user)):
+    """
+    Get current API v2 system status and metrics.
+    
+    Returns:
+        ApiV2StatusResponse: System status and metrics
+    """
+    try:
+        # Get adapter instance to check status
+        from open_webui.api_v2.adapter import OpenWebUIAdapter
+        
+        # This would be better if we had a singleton adapter instance
+        # For now, create a temporary one to get system status
+        adapter = OpenWebUIAdapter()
+        system_status = adapter.get_system_status()
+        
+        # Get task statistics (simplified)
+        active_tasks = system_status.get("active_tasks", 0)
+        queued_tasks = system_status.get("queued_tasks", 0)
+        
+        # Get current config version
+        current_config = request.app.state.config.API_V2_ADMIN_CONFIG
+        config_version = current_config.get("version", "1.0.0") if isinstance(current_config, dict) else "2.0.0"
+        last_update = current_config.get("last_modified") if isinstance(current_config, dict) else None
+        
+        return ApiV2StatusResponse(
+            enabled=system_status.get("enabled", True),
+            active_tasks=active_tasks,
+            queued_tasks=queued_tasks,
+            completed_tasks_24h=0,  # Would need metrics storage
+            failed_tasks_24h=0,     # Would need metrics storage
+            system_health={
+                "status": "healthy" if system_status.get("memory_usage", {}).get("used_percent", 0) < 90 else "warning",
+                "uptime_seconds": 0,  # Would need tracking
+                "last_health_check": time.time()
+            },
+            memory_usage=system_status.get("memory_usage", {}),
+            performance_metrics={
+                "avg_processing_time": 0.0,  # Would need metrics storage
+                "requests_per_minute": 0.0,  # Would need metrics storage
+                "error_rate": 0.0             # Would need metrics storage
+            },
+            configuration_version=config_version,
+            last_config_update=last_update
+        )
+        
+    except Exception as e:
+        log.error(f"Failed to get API v2 status: {e}")
+        raise HTTPException(status_code=500, detail=f"Status retrieval failed: {str(e)}")
+
+
+@router.get("/api_v2/admin/export")
+async def export_api_v2_config(request: Request, user=Depends(get_admin_user)):
+    """
+    Export current API v2 configuration as JSON.
+    
+    Returns:
+        Dict: Configuration export with metadata
+    """
+    try:
+        current_config = request.app.state.config.API_V2_ADMIN_CONFIG
+        
+        if isinstance(current_config, dict) and "llm" in current_config:
+            config = ApiV2AdminConfig(**current_config)
+        else:
+            config = migrate_legacy_config(current_config)
+        
+        return {
+            "export_timestamp": time.time(),
+            "exported_by": user.id,
+            "config_version": config.version,
+            "config": config.dict()
+        }
+        
+    except Exception as e:
+        log.error(f"Failed to export API v2 config: {e}")
+        raise HTTPException(status_code=500, detail=f"Configuration export failed: {str(e)}")
+
+
+@router.post("/api_v2/admin/import")
+async def import_api_v2_config(
+    request: Request, 
+    import_data: Dict[str, Any],
+    user=Depends(get_admin_user)
+):
+    """
+    Import API v2 configuration from JSON.
+    
+    Args:
+        import_data: Configuration import data
+        
+    Returns:
+        ApiV2AdminConfig: Imported configuration
+    """
+    try:
+        # Validate import data structure
+        if "config" not in import_data:
+            raise HTTPException(status_code=400, detail="Invalid import data: missing 'config' field")
+        
+        # Create config from import data
+        imported_config = ApiV2AdminConfig(**import_data["config"])
+        
+        # Update metadata
+        imported_config.last_modified = time.time()
+        imported_config.modified_by = user.id
+        
+        # Save to persistent storage
+        from open_webui.config import save_config_value
+        save_config_value("api_v2.admin_config", imported_config.dict())
+        
+        # Update runtime config
+        request.app.state.config.API_V2_ADMIN_CONFIG = imported_config.dict()
+        
+        log.info(f"API v2 config imported by user {user.id}")
+        
+        return imported_config
+        
+    except Exception as e:
+        log.error(f"Failed to import API v2 config: {e}")
+        raise HTTPException(status_code=500, detail=f"Configuration import failed: {str(e)}")

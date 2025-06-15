@@ -307,3 +307,61 @@ dist
 cypress/videos
 cypress/screenshots
 .vscode/settings.json
+
+# =============================================================================
+# SECURITY: Exclude sensitive development files and credentials
+# =============================================================================
+
+# Development documentation with real credentials
+claude_doc/
+
+# Backup files that may contain sensitive data
+backups/
+
+# Test reports with real API keys
+TESTS_API_V2_FORMATS_RAPPORT.md
+
+# Generated API keys and secrets
+.webui_secret_key
+*.api_key
+
+# Test files with credentials
+test_*apikey*.py
+test_formats_with_apikey.py
+test_patient.py
+test_fixed_paths.py
+test_quick_apikey.py
+
+# Temporary files from development
+nohup.out
+*.tmp
+*.temp
+
+# Development scripts that might contain credentials
+*_test_*.py
+verify_*.py
+restart_*.py
+
+# =============================================================================
+# Open WebUI specific exclusions
+# =============================================================================
+
+# Open WebUI data directory
+backend/open_webui/data/
+!backend/open_webui/data/.gitkeep
+
+# Uploaded files
+backend/open_webui/data/uploads/
+backend/open_webui/data/docs/
+
+# Database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Configuration with potential secrets
+config/production.env
+.env.production
+.env.local
+.env.*.local

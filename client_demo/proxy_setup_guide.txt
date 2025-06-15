@@ -1,0 +1,230 @@
+# 🌐 Guide de Configuration Proxy - Api-Doc-IA Demo Client
+
+Ce guide vous aide à configurer votre proxy d'entreprise **AVANT** la première installation.
+
+## ⚠️ Important
+
+**Vous devez configurer le proxy AVANT d'exécuter les scripts de build**, car pip a besoin d'accéder à Internet pour télécharger les dépendances.
+
+## 🪟 Configuration Windows
+
+### Méthode 1 : Variables d'environnement temporaires
+
+1. **Ouvrir une invite de commande** (cmd)
+2. **Configurer le proxy** pour cette session :
+   ```cmd
+   set HTTP_PROXY=http://proxy.entreprise.com:8080
+   set HTTPS_PROXY=http://proxy.entreprise.com:8080
+   ```
+3. **Lancer le build** depuis cette même invite de commande :
+   ```cmd
+   cd C:\chemin\vers\demo_client
+   build_scripts\build_windows.bat
+   ```
+
+### Méthode 2 : Variables d'environnement permanentes
+
+1. **Panneau de configuration** → Système → Paramètres système avancés
+2. **Variables d'environnement** → Nouvelles variables système :
+   - `HTTP_PROXY` = `http://proxy.entreprise.com:8080`
+   - `HTTPS_PROXY` = `http://proxy.entreprise.com:8080`
+3. **Redémarrer** l'invite de commande
+4. **Lancer le build** normalement
+
+### Méthode 3 : Script batch personnalisé
+
+Créez un fichier `build_with_proxy.bat` :
+```cmd
+@echo off
+set HTTP_PROXY=http://proxy.entreprise.com:8080
+set HTTPS_PROXY=http://proxy.entreprise.com:8080
+echo Proxy configuré: %HTTP_PROXY%
+call build_scripts\build_windows.bat
+pause
+```
+
+## 🐧 Configuration Linux
+
+### Méthode 1 : Variables d'environnement temporaires
+
+1. **Ouvrir un terminal**
+2. **Configurer le proxy** pour cette session :
+   ```bash
+   export HTTP_PROXY=http://proxy.entreprise.com:8080
+   export HTTPS_PROXY=http://proxy.entreprise.com:8080
+   ```
+3. **Lancer le build** depuis ce même terminal :
+   ```bash
+   cd /chemin/vers/demo_client
+   ./build_scripts/build_linux.sh
+   ```
+
+### Méthode 2 : Variables d'environnement permanentes
+
+1. **Éditer le fichier de profil** :
+   ```bash
+   nano ~/.bashrc
+   # ou
+   nano ~/.zshrc
+   ```
+2. **Ajouter les lignes** :
+   ```bash
+   export HTTP_PROXY=http://proxy.entreprise.com:8080
+   export HTTPS_PROXY=http://proxy.entreprise.com:8080
+   ```
+3. **Recharger le profil** :
+   ```bash
+   source ~/.bashrc
+   ```
+
+### Méthode 3 : Script shell personnalisé
+
+Créez un fichier `build_with_proxy.sh` :
+```bash
+#!/bin/bash
+export HTTP_PROXY=http://proxy.entreprise.com:8080
+export HTTPS_PROXY=http://proxy.entreprise.com:8080
+echo "Proxy configuré: $HTTP_PROXY"
+./build_scripts/build_linux.sh
+```
+
+Rendez-le exécutable :
+```bash
+chmod +x build_with_proxy.sh
+./build_with_proxy.sh
+```
+
+## 🔧 Formats de Proxy Courants
+
+### Proxy simple (sans authentification)
+```
+http://proxy.entreprise.com:8080
+```
+
+### Proxy avec authentification
+```
+http://utilisateur:motdepasse@proxy.entreprise.com:8080
+```
+
+### Proxy HTTPS
+```
+https://proxy.entreprise.com:8443
+```
+
+### Proxy avec port spécifique
+```
+http://10.0.0.1:3128
+```
+
+## 🧪 Test de Configuration
+
+### Test rapide pip
+```bash
+# Windows
+pip --proxy http://proxy:8080 list
+
+# Linux  
+pip3 --proxy http://proxy:8080 list
+```
+
+### Test connectivité avec curl
+```bash
+# Test HTTP
+curl --proxy http://proxy:8080 http://www.google.com
+
+# Test HTTPS
+curl --proxy http://proxy:8080 https://pypi.org
+```
+
+## 📋 Checklist de Dépannage
+
+### ✅ Vérifications de base
+- [ ] L'adresse du proxy est correcte
+- [ ] Le port du proxy est correct
+- [ ] Les identifiants sont corrects (si nécessaire)
+- [ ] Le proxy autorise le trafic HTTP/HTTPS
+- [ ] Pas de caractères spéciaux non échappés dans l'URL
+
+### ✅ Tests de connectivité
+- [ ] Ping vers le serveur proxy réussit
+- [ ] Navigateur web fonctionne avec ce proxy
+- [ ] Autre logiciel utilise ce proxy avec succès
+
+### ✅ Variables d'environnement
+- [ ] HTTP_PROXY défini correctement
+- [ ] HTTPS_PROXY défini correctement
+- [ ] Variables visibles dans l'invite de commande/terminal
+
+## 🆘 Problèmes Courants
+
+### "Connection refused" ou "Network unreachable"
+- Vérifiez l'adresse et le port du proxy
+- Testez avec un navigateur web
+- Contactez l'administrateur réseau
+
+### "Proxy authentication required"
+- Ajoutez vos identifiants dans l'URL :
+  `http://user:pass@proxy:8080`
+- Vérifiez vos identifiants avec l'administrateur
+
+### "SSL Certificate verification failed"
+- Le proxy peut bloquer les certificats SSL
+- Contactez l'administrateur pour la configuration HTTPS
+- Utilisez HTTP au lieu de HTTPS si possible
+
+### "Access denied" ou "Forbidden"
+- Le proxy peut bloquer pypi.org
+- Demandez à l'administrateur d'autoriser :
+  - `pypi.org`
+  - `files.pythonhosted.org`
+  - `github.com`
+
+## 💡 Conseils Avancés
+
+### Variables d'environnement supplémentaires
+```bash
+# Exclure certaines adresses du proxy
+export NO_PROXY=localhost,127.0.0.1,.local
+
+# Proxy pour tous les protocoles
+export ALL_PROXY=http://proxy:8080
+```
+
+### Configuration proxy dans pip.conf
+Créez `~/.pip/pip.conf` (Linux) ou `%APPDATA%\pip\pip.ini` (Windows) :
+```ini
+[global]
+proxy = http://proxy.entreprise.com:8080
+trusted-host = pypi.org
+               files.pythonhosted.org
+```
+
+### Test avec Python
+```python
+import os
+import requests
+
+# Vérifier les variables
+print("HTTP_PROXY:", os.environ.get('HTTP_PROXY'))
+print("HTTPS_PROXY:", os.environ.get('HTTPS_PROXY'))
+
+# Test requête
+try:
+    r = requests.get('https://pypi.org/simple/', timeout=10)
+    print("Connectivité PyPI: OK")
+except Exception as e:
+    print("Erreur:", e)
+```
+
+## 📞 Support
+
+Si vous rencontrez des difficultés :
+
+1. **Vérifiez vos paramètres** avec votre administrateur réseau
+2. **Testez la connectivité** avec les commandes ci-dessus
+3. **Consultez les logs** détaillés des scripts de build
+4. **Utilisez le script de test** : `python test_proxy.py`
+
+---
+
+**💡 Astuce :** Gardez ces paramètres proxy à portée de main, vous en aurez besoin pour d'autres outils Python dans votre environnement d'entreprise !

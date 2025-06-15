@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # =============================================================================
-# 🚀 API-DOC-IA INSTALLATION SCRIPT (IMPROVED v3)
+# 🚀 API-DOC-IA INSTALLATION SCRIPT (IMPROVED v4)
 # =============================================================================
-# Utilise backend/requirements.txt + gestion dépendances système + Python 3.11
+# Détection automatique et corrections : Python 3.11 + onnxruntime
 # =============================================================================
 
 set -e
@@ -22,8 +22,69 @@ BACKEND_PATH="$PROJECT_ROOT/backend"
 REQUIREMENTS_FILE="$BACKEND_PATH/requirements.txt"
 
 echo -e "${BLUE}============================================${NC}"
-echo -e "${BLUE}🚀 API-DOC-IA INSTALLATION (IMPROVED v3)${NC}"
+echo -e "${BLUE}🚀 API-DOC-IA INSTALLATION (IMPROVED v4)${NC}"
 echo -e "${BLUE}============================================${NC}"
+
+# =============================================================================
+# SMART FIXES - AUTO-DETECTION AND CORRECTION
+# =============================================================================
+
+fix_onnxruntime_version() {
+    echo -e "${BLUE}🔍 Checking onnxruntime version compatibility...${NC}"
+    
+    if grep -q "onnxruntime==1.20.1" "$REQUIREMENTS_FILE"; then
+        echo -e "${YELLOW}⚠️ Detected onnxruntime==1.20.1 (version not available)${NC}"
+        echo -e "${BLUE}🔧 Auto-correcting to available version...${NC}"
+        
+        # Backup original file
+        cp "$REQUIREMENTS_FILE" "$REQUIREMENTS_FILE.backup"
+        
+        # Fix the version
+        sed -i 's/onnxruntime==1.20.1/onnxruntime==1.19.2/' "$REQUIREMENTS_FILE"
+        
+        echo -e "${GREEN}✅ Corrected onnxruntime version: 1.20.1 → 1.19.2${NC}"
+    else
+        echo -e "${GREEN}✅ onnxruntime version looks compatible${NC}"
+    fi
+}
+
+install_python311_rhel9() {
+    echo -e "${BLUE}🐍 Installing Python 3.11 on RHEL 9/Rocky 9...${NC}"
+    
+    # Check if we're root or can use sudo
+    SUDO_CMD=""
+    if [ "$EUID" -ne 0 ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            SUDO_CMD="sudo"
+        else
+            echo -e "${RED}❌ Not running as root and sudo not available${NC}"
+            return 1
+        fi
+    fi
+    
+    # Install EPEL if not already installed
+    if ! rpm -q epel-release >/dev/null 2>&1; then
+        echo -e "${BLUE}📦 Installing EPEL repository...${NC}"
+        $SUDO_CMD dnf install -y epel-release
+    else
+        echo -e "${GREEN}✅ EPEL repository already installed${NC}"
+    fi
+    
+    # Install Python 3.11 packages
+    echo -e "${BLUE}📦 Installing Python 3.11...${NC}"
+    $SUDO_CMD dnf install -y python3.11 python3.11-pip python3.11-devel
+    
+    # Verify installation
+    if command -v python3.11 >/dev/null 2>&1; then
+        PYTHON_VERSION=$(python3.11 --version)
+        echo -e "${GREEN}✅ Python 3.11 installed successfully: $PYTHON_VERSION${NC}"
+        PYTHON_CMD="python3.11"
+        return 0
+    else
+        echo -e "${RED}❌ Failed to install Python 3.11${NC}"
+        return 1
+    fi
+}
 
 # =============================================================================
 # SYSTEM DETECTION
@@ -36,7 +97,25 @@ detect_os() {
         if command -v dnf >/dev/null 2>&1; then
             OS_TYPE="fedora"
             PACKAGE_MANAGER="dnf"
-            echo -e "${GREEN}✅ Fedora/RHEL detected${NC}"
+            
+            # Detect specific RHEL/Rocky version for Python 3.11 handling
+            if [ -f /etc/os-release ]; then
+                source /etc/os-release
+                if [[ "$ID" == "rocky" ]] && [[ "$VERSION_ID" == "9"* ]]; then
+                    ROCKY_VERSION="9"
+                    echo -e "${GREEN}✅ Rocky Linux 9 detected${NC}"
+                elif [[ "$ID" == "rhel" ]] && [[ "$VERSION_ID" == "9"* ]]; then
+                    RHEL_VERSION="9"
+                    echo -e "${GREEN}✅ RHEL 9 detected${NC}"
+                elif [[ "$ID" == "rocky" ]] && [[ "$VERSION_ID" == "8"* ]]; then
+                    ROCKY_VERSION="8"
+                    echo -e "${YELLOW}⚠️ Rocky Linux 8 detected (limited Python support)${NC}"
+                else
+                    echo -e "${GREEN}✅ Fedora/RHEL detected${NC}"
+                fi
+            else
+                echo -e "${GREEN}✅ Fedora/RHEL detected${NC}"
+            fi
         elif command -v apt >/dev/null 2>&1; then
             OS_TYPE="debian"
             PACKAGE_MANAGER="apt"
@@ -110,48 +189,6 @@ check_python_version() {
     fi
 }
 
-install_python311_ubuntu() {
-    echo -e "${BLUE}🐍 Installing Python 3.11 on Ubuntu...${NC}"
-    
-    # Check if we're root or can use sudo
-    SUDO_CMD=""
-    if [ "$EUID" -ne 0 ]; then
-        if command -v sudo >/dev/null 2>&1; then
-            SUDO_CMD="sudo"
-        else
-            echo -e "${RED}❌ Not running as root and sudo not available${NC}"
-            return 1
-        fi
-    fi
-    
-    # Install required packages for adding PPA
-    if ! command -v add-apt-repository >/dev/null 2>&1; then
-        echo -e "${BLUE}📦 Installing software-properties-common...${NC}"
-        $SUDO_CMD apt update
-        $SUDO_CMD apt install -y software-properties-common
-    fi
-    
-    # Add deadsnakes PPA for Python 3.11
-    echo -e "${BLUE}📦 Adding deadsnakes PPA for Python 3.11...${NC}"
-    $SUDO_CMD add-apt-repository ppa:deadsnakes/ppa -y
-    $SUDO_CMD apt update
-    
-    # Install Python 3.11
-    echo -e "${BLUE}📦 Installing Python 3.11...${NC}"
-    $SUDO_CMD apt install -y python3.11 python3.11-venv python3.11-dev python3.11-distutils
-    
-    # Verify installation
-    if command -v python3.11 >/dev/null 2>&1; then
-        PYTHON_VERSION=$(python3.11 --version)
-        echo -e "${GREEN}✅ Python 3.11 installed successfully: $PYTHON_VERSION${NC}"
-        PYTHON_CMD="python3.11"
-        return 0
-    else
-        echo -e "${RED}❌ Failed to install Python 3.11${NC}"
-        return 1
-    fi
-}
-
 # =============================================================================
 # DEPENDENCY MANAGEMENT
 # =============================================================================
@@ -161,27 +198,61 @@ install_system_deps() {
     
     case $OS_TYPE in
         "fedora")
-            echo -e "${BLUE}🔧 Installing Fedora dependencies...${NC}"
+            echo -e "${BLUE}🔧 Installing Fedora/RHEL dependencies...${NC}"
             
-            # Vérifier si les paquets sont déjà installés
+            # Check if we're root or can use sudo
+            SUDO_CMD=""
+            if [ "$EUID" -ne 0 ]; then
+                if command -v sudo >/dev/null 2>&1; then
+                    SUDO_CMD="sudo"
+                else
+                    echo -e "${RED}❌ Not running as root and sudo not available${NC}"
+                    return 1
+                fi
+            fi
+            
+            # Special handling for Rocky/RHEL 9 - install Python 3.11 first
+            if [[ "$ROCKY_VERSION" == "9" ]] || [[ "$RHEL_VERSION" == "9" ]]; then
+                if ! check_python_version; then
+                    echo -e "${YELLOW}🐍 Rocky/RHEL 9 detected with Python < 3.11${NC}"
+                    read -p "Install Python 3.11 automatically? (Y/n): " -r
+                    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                        if ! install_python311_rhel9; then
+                            echo -e "${RED}❌ Failed to install Python 3.11${NC}"
+                            return 1
+                        fi
+                    else
+                        echo -e "${YELLOW}⚠️ Continuing with Python $PYTHON_VERSION - may cause issues${NC}"
+                        PYTHON_CMD="python3"
+                    fi
+                fi
+            fi
+            
+            # Standard system dependencies
             MISSING_DEPS=()
             
-            # Vérifier postgresql-devel
-            if ! rpm -q postgresql-devel >/dev/null 2>&1 && ! rpm -q postgresql-private-devel >/dev/null 2>&1; then
-                MISSING_DEPS+=("postgresql-devel")
+            # Check postgresql-devel
+            if ! rpm -q postgresql-devel >/dev/null 2>&1 && ! rpm -q postgresql-private-devel >/dev/null 2>&1 && ! rpm -q libpq-devel >/dev/null 2>&1; then
+                MISSING_DEPS+=("libpq-devel")
             fi
             
-            # Vérifier python3-devel  
-            if ! rpm -q python3-devel >/dev/null 2>&1; then
-                MISSING_DEPS+=("python3-devel")
+            # Check python3-devel (for the correct Python version)
+            if [[ "$PYTHON_CMD" == "python3.11" ]]; then
+                if ! rpm -q python3.11-devel >/dev/null 2>&1; then
+                    MISSING_DEPS+=("python3.11-devel")
+                fi
+            else
+                if ! rpm -q python3-devel >/dev/null 2>&1; then
+                    MISSING_DEPS+=("python3-devel")
+                fi
             fi
             
-            # Vérifier gcc
+            # Check gcc
             if ! rpm -q gcc >/dev/null 2>&1; then
                 MISSING_DEPS+=("gcc")
             fi
             
-            # Vérifier git (pour certaines installations pip)
+            # Check git
             if ! command -v git >/dev/null 2>&1; then
                 MISSING_DEPS+=("git")
             fi
@@ -191,7 +262,7 @@ install_system_deps() {
                 read -p "Install missing system dependencies? (Y/n): " -r
                 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
                     echo -e "${BLUE}⚙️ Installing: ${MISSING_DEPS[*]}${NC}"
-                    if sudo dnf install -y "${MISSING_DEPS[@]}"; then
+                    if $SUDO_CMD dnf install -y "${MISSING_DEPS[@]}"; then
                         echo -e "${GREEN}✅ System dependencies installed successfully${NC}"
                     else
                         echo -e "${RED}❌ Failed to install some dependencies${NC}"
@@ -316,6 +387,48 @@ install_system_deps() {
     esac
 }
 
+install_python311_ubuntu() {
+    echo -e "${BLUE}🐍 Installing Python 3.11 on Ubuntu...${NC}"
+    
+    # Check if we're root or can use sudo
+    SUDO_CMD=""
+    if [ "$EUID" -ne 0 ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            SUDO_CMD="sudo"
+        else
+            echo -e "${RED}❌ Not running as root and sudo not available${NC}"
+            return 1
+        fi
+    fi
+    
+    # Install required packages for adding PPA
+    if ! command -v add-apt-repository >/dev/null 2>&1; then
+        echo -e "${BLUE}📦 Installing software-properties-common...${NC}"
+        $SUDO_CMD apt update
+        $SUDO_CMD apt install -y software-properties-common
+    fi
+    
+    # Add deadsnakes PPA for Python 3.11
+    echo -e "${BLUE}📦 Adding deadsnakes PPA for Python 3.11...${NC}"
+    $SUDO_CMD add-apt-repository ppa:deadsnakes/ppa -y
+    $SUDO_CMD apt update
+    
+    # Install Python 3.11
+    echo -e "${BLUE}📦 Installing Python 3.11...${NC}"
+    $SUDO_CMD apt install -y python3.11 python3.11-venv python3.11-dev python3.11-distutils
+    
+    # Verify installation
+    if command -v python3.11 >/dev/null 2>&1; then
+        PYTHON_VERSION=$(python3.11 --version)
+        echo -e "${GREEN}✅ Python 3.11 installed successfully: $PYTHON_VERSION${NC}"
+        PYTHON_CMD="python3.11"
+        return 0
+    else
+        echo -e "${RED}❌ Failed to install Python 3.11${NC}"
+        return 1
+    fi
+}
+
 # =============================================================================
 # PYTHON ENVIRONMENT SETUP
 # =============================================================================
@@ -420,6 +533,9 @@ setup_python_env() {
 
 install_backend_deps() {
     echo -e "${BLUE}📦 Installing backend dependencies...${NC}"
+    
+    # Auto-fix onnxruntime version if needed
+    fix_onnxruntime_version
     
     # Vérifier que le fichier requirements.txt existe
     if [ ! -f "$REQUIREMENTS_FILE" ]; then
@@ -581,6 +697,13 @@ try:
 except ImportError:
     print('⚠️ Sentence Transformers not available')
 
+# Test onnxruntime specifically
+try:
+    import onnxruntime
+    print('✅ ONNX Runtime available:', onnxruntime.__version__)
+except ImportError:
+    print('⚠️ ONNX Runtime not available')
+
 # Test Open WebUI imports (if available)
 try:
     import open_webui
@@ -601,14 +724,17 @@ print('\\n🎉 Core dependency verification completed!')
 # =============================================================================
 
 main() {
-    echo -e "${BLUE}Welcome to Api-Doc-IA installation! (Using backend/requirements.txt)${NC}"
-    echo -e "${BLUE}This script will install all dependencies for full Open WebUI compatibility.${NC}"
+    echo -e "${BLUE}Welcome to Api-Doc-IA installation! (Auto-correcting version)${NC}"
+    echo -e "${BLUE}This script will install all dependencies with smart fixes for compatibility.${NC}"
     echo ""
     
     # Initialize environment tracking variables
     USING_CONDA=false
     USING_VENV=false
     PYTHON_CMD=""
+    ROCKY_VERSION=""
+    RHEL_VERSION=""
+    UBUNTU_VERSION=""
     
     # Check requirements file
     if [ ! -f "$REQUIREMENTS_FILE" ]; then
@@ -626,7 +752,7 @@ main() {
     detect_os
     echo ""
     
-    # System dependencies (includes Python 3.11 check for Ubuntu)
+    # System dependencies (includes Python 3.11 check for Ubuntu/Rocky)
     install_system_deps
     echo ""
     
@@ -634,7 +760,7 @@ main() {
     setup_python_env
     echo ""
     
-    # Backend dependencies
+    # Backend dependencies (with auto-fixes)
     install_backend_deps
     echo ""
     
@@ -677,6 +803,12 @@ main() {
     echo -e "   • Configure models in settings"
     echo -e "   • Test file upload functionality"
     echo ""
+    
+    # Display applied fixes
+    if [ -f "$REQUIREMENTS_FILE.backup" ]; then
+        echo -e "${BLUE}🔧 Applied fixes:${NC}"
+        echo -e "${GREEN}   ✅ Corrected onnxruntime version compatibility${NC}"
+    fi
     
     echo -e "${GREEN}Thank you for using Api-Doc-IA! 🚀${NC}"
 }

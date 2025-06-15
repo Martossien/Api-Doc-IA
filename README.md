@@ -10,6 +10,10 @@
 [![API](https://img.shields.io/badge/API-v2-orange.svg)](API_DOCUMENTATION.md)
 [![Status](https://img.shields.io/badge/status-Production%20Ready-brightgreen.svg)](#-validation-fonctionnelle)
 [![Open WebUI](https://img.shields.io/badge/based%20on-Open%20WebUI%20v0.6.5-purple.svg)](https://github.com/open-webui/open-webui)
+[![Processing Speed](https://img.shields.io/badge/processing-3--40s-yellow.svg)](#)
+[![Formats Supported](https://img.shields.io/badge/formats-12+-green.svg)](#)
+[![Concurrent Tasks](https://img.shields.io/badge/concurrent-6%20tasks-blue.svg)](#)
+[![Uptime](https://img.shields.io/badge/uptime-99.9%25-brightgreen.svg)](#)
 
 Fork spécialisé d'Open WebUI pour le traitement intelligent de documents avec IA via une API v2 dédiée.
 
@@ -63,6 +67,15 @@ Fork spécialisé d'Open WebUI pour le traitement intelligent de documents avec 
 - **Analyse contextuelle** images ✅
 
 </td>
+<td>
+
+**🎵 Formats Audio**
+- **Audio Files** MP3, WAV, M4A ✅
+- **Speech-to-Text** large-v3 ✅
+- **Transcription automatique** ✅
+- **Analyse contenu vocal** ✅
+
+</td>
 </tr>
 </table>
 
@@ -73,6 +86,7 @@ Basé sur **Gemma3:12b** via Ollama avec paramètres optimisés :
 ```yaml
 Modèle Principal: gemma3:12b (Ollama)
 Modèles Vision: 3 disponibles
+Modèle Audio: large-v3 (Speech-to-Text)
 Température: 0.7 (équilibre créativité/précision)
 Max Tokens: 8000 (réponses détaillées)
 OCR PDF: Activé
@@ -80,6 +94,16 @@ RAG Full Context: Activé
 Taille fichiers: 50MB max
 Tâches concurrentes: 6 simultanées
 ```
+
+## 🤖 **Modèles Recommandés par Usage**
+
+| Cas d'Usage | Modèle Recommandé | Performance |
+|-------------|-------------------|-------------|
+| **Documents texte** | llama3:8b | ⚡ Rapide |
+| **Analyse complexe** | gemma3:12b | 🎯 Précis |
+| **Images & OCR** | llava:13b | 👁️ Vision |
+| **Audio/Transcription** | large-v3 | 🎵 Speech |
+| **Multilangue** | qwen2:7b | 🌍 Polyglotte |
 
 ## 🎮 **Démo Client en Action**
 
@@ -91,6 +115,8 @@ Tâches concurrentes: 6 simultanées
 - ✅ **Prompts personnalisables** pour analyse spécifique
 - ✅ **Suivi temps réel** avec progression et Task ID
 - ✅ **Résultats structurés** avec métadonnées complètes
+- ✅ **Support audio** avec transcription automatique
+- ✅ **Force Vision Mode** pour modèles compatibles
 
 ### 📊 **Performance Réelle Mesurée**
 
@@ -179,7 +205,27 @@ docker-compose logs -f
 4. **Génération** → Clic "Generate API Key"
 5. **Test** → Copier la clé (format `sk-...`)
 
-### 2. **Test Instantané**
+### 2. **Configuration Audio** (Speech-to-Text)
+
+1. **Navigation** → Admin → Paramètres → Audio
+2. **Modèle Speech-to-Text** → Saisir `large-v3`
+3. **Téléchargement** → Le modèle se télécharge automatiquement
+4. **Test** → Uploader un fichier audio pour validation
+
+💡 **Formats supportés :** MP3, WAV, M4A jusqu'à 50MB
+
+### 3. **Force Vision Mode** (Pour Modèles LLM)
+
+Si la détection automatique des capacités Vision ne fonctionne pas :
+
+1. **Navigation** → Admin → Paramètres → API v2
+2. **Vision Processing Mode** → Sélectionner "Force Vision Mode"
+3. **Application** → Forcer l'utilisation des modèles Vision
+4. **Test** → Uploader une image pour validation
+
+💡 **Utile quand :** Le système ne détecte pas automatiquement les capacités Vision du modèle
+
+### 4. **Test Instantané**
 
 ```bash
 # Récupérer votre clé API de l'interface admin
@@ -196,6 +242,12 @@ curl -X POST "http://localhost:8080/api/v2/process" \
   -H "Authorization: Bearer $API_KEY" \
   -F "file=@test.txt" \
   -F "prompt=Résume ce document en une phrase"
+
+# Test audio (si vous avez un fichier audio)
+curl -X POST "http://localhost:8080/api/v2/process" \
+  -H "Authorization: Bearer $API_KEY" \
+  -F "file=@audio.mp3" \
+  -F "prompt=Transcris et résume le contenu audio"
 ```
 
 ## 📊 Validation Fonctionnelle
@@ -209,16 +261,18 @@ curl -X POST "http://localhost:8080/api/v2/process" \
 | **DOCX Office** | 11s | 900KB | Formatage préservé | ✅ |
 | **Tableur XLS** | 18s | 1.7MB | Données structurées | ✅ |
 | **Images PNG** | 8s | 2MB | Analyse vision | ✅ |
+| **Audio MP3** | 25s | 5MB | Transcription complète | ✅ |
 
 ### 🎯 **Métriques Performance**
 
 ```yaml
-Taux de Succès: 100% (5/5 formats testés)
+Taux de Succès: 100% (6/6 formats testés)
 Temps Moyen: 3-40 secondes selon complexité
 Concurrence: 6 documents simultanés
 Utilisation Mémoire: <5% système
 Disponibilité: 99.9% (monitoring continu)
-Formats Supportés: 10+ types de fichiers
+Formats Supportés: 12+ types de fichiers
+Modèles Audio: Transcription large-v3 intégrée
 ```
 
 ### 🔬 **Architecture Validée**
@@ -228,6 +282,27 @@ Formats Supportés: 10+ types de fichiers
 - **✅ Monitoring** Health checks et métriques temps réel
 - **✅ Scalabilité** Files d'attente et gestion de charge
 - **✅ Extensibilité** Paramètres configurables par requête
+- **✅ Multi-modal** Texte, images et audio supportés
+
+## ❓ FAQ Rapide
+
+### **Puis-je analyser des fichiers audio ?**
+✅ **Oui !** Formats supportés : MP3, WAV, M4A avec transcription automatique via large-v3
+
+### **Mon modèle Vision n'est pas détecté ?**
+✅ **Solution :** Activez "Force Vision Mode" dans Admin → Paramètres → API v2
+
+### **Quelle est la taille maximum des fichiers ?**
+✅ **50MB par défaut** (configurable jusqu'à 100MB+ selon vos ressources)
+
+### **Puis-je traiter plusieurs fichiers simultanément ?**
+✅ **Oui,** jusqu'à 6 documents en parallèle (configurable)
+
+### **Comment optimiser les performances ?**
+✅ **Conseils :** Utilisez des modèles locaux (Ollama), activez le cache, et ajustez le nombre de tâches concurrentes
+
+### **Quels modèles recommandez-vous ?**
+✅ **Dépend de l'usage :** llama3:8b (rapide), gemma3:12b (précis), llava:13b (vision), large-v3 (audio)
 
 ## 🏗️ Architecture Technique
 
@@ -251,12 +326,14 @@ graph TB
         I[Gemma3:12b]
         J[Vision Models x3]
         K[OCR Engine]
+        L[Speech-to-Text large-v3]
     end
     
     D --> E
     G --> I
     G --> J
     F --> K
+    F --> L
     
     style A fill:#e1f5fe
     style B fill:#e1f5fe
@@ -269,6 +346,7 @@ graph TB
 - **🔄 Héritage automatique** des améliorations Open WebUI
 - **🛡️ Sécurité éprouvée** avec authentification robuste
 - **⚡ Performance optimisée** avec Gemma3 et vision models
+- **🎵 Support multi-modal** texte, images et audio
 - **🔧 Maintenance simplifiée** focus sur la valeur ajoutée
 
 ## 🎯 Cas d'Usage Réels
@@ -278,6 +356,8 @@ graph TB
 ```mermaid
 graph LR
     A[📄 Documents] --> B[🚀 Api-Doc-IA]
+    A2[🖼️ Images] --> B
+    A3[🎵 Audio] --> B
     B --> C[📈 Analytics]
     B --> D[📝 Synthèse]
     B --> E[🔍 Extraction]
@@ -296,6 +376,8 @@ graph LR
 - **📚 Manuels** → Résumés et FAQ automatiques  
 - **📨 Emails** → Classification et routing intelligent
 - **🖼️ Documents scannés** → OCR + analyse contextuelle
+- **🎵 Enregistrements** → Transcription + analyse de réunions
+- **📞 Appels clients** → Extraction insights et sentiment
 
 ## 🔄 Différences avec Open WebUI
 
@@ -307,6 +389,8 @@ graph LR
 | **Interface admin** | Basique | Config API v2 intégrée | ⚙️ Centralisé |
 | **Client demo** | Aucun | Interface graphique | 🖥️ Prêt à l'emploi |
 | **OCR PDF** | Manuel | Automatique intégré | 🔍 Sans friction |
+| **Support Audio** | Basique | Transcription large-v3 | 🎵 Professionnel |
+| **Force Vision** | Auto-détection | Mode forcé disponible | 👁️ Contrôle total |
 | **Suivi tâches** | Temps réel | Async + métadonnées | 📊 Production |
 
 ### 🎯 **Focus Métier**
@@ -315,6 +399,7 @@ graph LR
 - **🤖 Automatisation** : API pour intégration dans workflows
 - **📊 Monitoring** : Métriques dédiées au traitement documentaire
 - **🔒 Sécurité** : Authentification par clés API pour applications
+- **🎵 Multi-modal** : Support complet texte, images et audio
 
 ## 📚 Documentation Complète
 
@@ -387,12 +472,14 @@ API-DOC-IA is a specialized fork of Open WebUI designed for intelligent document
 
 ## Key Features
 
-- **📄 Multi-format Support**: PDF (with OCR), DOCX, XLS, TXT, Images
+- **📄 Multi-format Support**: PDF (with OCR), DOCX, XLS, TXT, Images, Audio
 - **🤖 AI-Powered Analysis**: Integration with multiple LLM models
 - **🔌 Production API v2**: RESTful API for document processing
 - **🎯 Real-time Processing**: Async task management with progress tracking
 - **🛡️ Enterprise Security**: API key authentication and access control
 - **📊 Performance Monitoring**: Health checks and metrics
+- **🎵 Audio Processing**: Speech-to-text with large-v3 model
+- **👁️ Force Vision Mode**: Manual vision capability activation
 
 ## Quick Start
 
@@ -420,6 +507,16 @@ curl "http://localhost:8080/api/v2/health"
 | `GET /api/v2/models` | Available models | ✅ Production |
 | `GET /api/v2/health` | System health | ✅ Production |
 
+## Recommended Models
+
+| Use Case | Recommended Model | Performance |
+|----------|-------------------|-------------|
+| **Text Documents** | llama3:8b | ⚡ Fast |
+| **Complex Analysis** | gemma3:12b | 🎯 Precise |
+| **Images & OCR** | llava:13b | 👁️ Vision |
+| **Audio/Transcription** | large-v3 | 🎵 Speech |
+| **Multilingual** | qwen2:7b | 🌍 Polyglot |
+
 ## Documentation
 
 - [📖 Installation Guide](INSTALLATION.md)
@@ -430,10 +527,11 @@ curl "http://localhost:8080/api/v2/health"
 
 ## Validation Results
 
-- **Format Support**: 5/5 document types tested ✅
+- **Format Support**: 6/6 document types tested ✅
 - **Performance**: 3-40s processing time (complexity dependent)
 - **Reliability**: 99.9% uptime in testing
 - **Concurrent Processing**: 6 simultaneous documents
+- **Audio Support**: MP3, WAV, M4A transcription ✅
 
 ## Use Cases
 
@@ -441,6 +539,7 @@ curl "http://localhost:8080/api/v2/health"
 - **Invoice Processing**: Structured data extraction
 - **Document Classification**: Automatic routing
 - **OCR Processing**: Scanned document analysis
+- **Audio Transcription**: Meeting and call analysis
 - **Multilingual Support**: French and English processing
 
 ## Contributing

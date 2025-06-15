@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # =============================================================================
-# 🚀 API-DOC-IA INSTALLATION SCRIPT (IMPROVED v2)
+# 🚀 API-DOC-IA INSTALLATION SCRIPT (IMPROVED v3)
 # =============================================================================
-# Utilise backend/requirements.txt + gestion dépendances système Fedora
+# Utilise backend/requirements.txt + gestion dépendances système + Python 3.11
 # =============================================================================
 
 set -e
@@ -22,7 +22,7 @@ BACKEND_PATH="$PROJECT_ROOT/backend"
 REQUIREMENTS_FILE="$BACKEND_PATH/requirements.txt"
 
 echo -e "${BLUE}============================================${NC}"
-echo -e "${BLUE}🚀 API-DOC-IA INSTALLATION (IMPROVED v2)${NC}"
+echo -e "${BLUE}🚀 API-DOC-IA INSTALLATION (IMPROVED v3)${NC}"
 echo -e "${BLUE}============================================${NC}"
 
 # =============================================================================
@@ -40,7 +40,19 @@ detect_os() {
         elif command -v apt >/dev/null 2>&1; then
             OS_TYPE="debian"
             PACKAGE_MANAGER="apt"
-            echo -e "${GREEN}✅ Ubuntu/Debian detected${NC}"
+            
+            # Detect specific Ubuntu version for Python 3.11 handling
+            if [ -f /etc/os-release ]; then
+                source /etc/os-release
+                if [[ "$ID" == "ubuntu" ]]; then
+                    UBUNTU_VERSION="$VERSION_ID"
+                    echo -e "${GREEN}✅ Ubuntu $UBUNTU_VERSION detected${NC}"
+                else
+                    echo -e "${GREEN}✅ Debian-based system detected${NC}"
+                fi
+            else
+                echo -e "${GREEN}✅ Ubuntu/Debian detected${NC}"
+            fi
         elif command -v pacman >/dev/null 2>&1; then
             OS_TYPE="arch"
             PACKAGE_MANAGER="pacman"
@@ -58,6 +70,85 @@ detect_os() {
         OS_TYPE="unknown"
         PACKAGE_MANAGER="unknown"
         echo -e "${YELLOW}⚠️ Unknown OS: $OSTYPE${NC}"
+    fi
+}
+
+# =============================================================================
+# PYTHON VERSION MANAGEMENT
+# =============================================================================
+
+check_python_version() {
+    echo -e "${BLUE}🐍 Checking Python version...${NC}"
+    
+    # Check if python3.11 is available
+    if command -v python3.11 >/dev/null 2>&1; then
+        PYTHON_CMD="python3.11"
+        PYTHON_VERSION=$(python3.11 --version)
+        echo -e "${GREEN}✅ Python 3.11 found: $PYTHON_VERSION${NC}"
+        return 0
+    fi
+    
+    # Check default python3 version
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_VERSION=$(python3 --version 2>&1 | grep -o '[0-9]\+\.[0-9]\+')
+        PYTHON_MAJOR=$(echo $PYTHON_VERSION | cut -d. -f1)
+        PYTHON_MINOR=$(echo $PYTHON_VERSION | cut -d. -f2)
+        
+        echo -e "${BLUE}   Current Python: $PYTHON_VERSION${NC}"
+        
+        if [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -ge 11 ]; then
+            PYTHON_CMD="python3"
+            echo -e "${GREEN}✅ Python $PYTHON_VERSION is compatible${NC}"
+            return 0
+        else
+            echo -e "${YELLOW}⚠️ Python $PYTHON_VERSION detected - Open WebUI requires Python 3.11+${NC}"
+            return 1
+        fi
+    else
+        echo -e "${RED}❌ No Python 3 found${NC}"
+        return 1
+    fi
+}
+
+install_python311_ubuntu() {
+    echo -e "${BLUE}🐍 Installing Python 3.11 on Ubuntu...${NC}"
+    
+    # Check if we're root or can use sudo
+    SUDO_CMD=""
+    if [ "$EUID" -ne 0 ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            SUDO_CMD="sudo"
+        else
+            echo -e "${RED}❌ Not running as root and sudo not available${NC}"
+            return 1
+        fi
+    fi
+    
+    # Install required packages for adding PPA
+    if ! command -v add-apt-repository >/dev/null 2>&1; then
+        echo -e "${BLUE}📦 Installing software-properties-common...${NC}"
+        $SUDO_CMD apt update
+        $SUDO_CMD apt install -y software-properties-common
+    fi
+    
+    # Add deadsnakes PPA for Python 3.11
+    echo -e "${BLUE}📦 Adding deadsnakes PPA for Python 3.11...${NC}"
+    $SUDO_CMD add-apt-repository ppa:deadsnakes/ppa -y
+    $SUDO_CMD apt update
+    
+    # Install Python 3.11
+    echo -e "${BLUE}📦 Installing Python 3.11...${NC}"
+    $SUDO_CMD apt install -y python3.11 python3.11-venv python3.11-dev python3.11-distutils
+    
+    # Verify installation
+    if command -v python3.11 >/dev/null 2>&1; then
+        PYTHON_VERSION=$(python3.11 --version)
+        echo -e "${GREEN}✅ Python 3.11 installed successfully: $PYTHON_VERSION${NC}"
+        PYTHON_CMD="python3.11"
+        return 0
+    else
+        echo -e "${RED}❌ Failed to install Python 3.11${NC}"
+        return 1
     fi
 }
 
@@ -116,18 +207,72 @@ install_system_deps() {
             
         "debian")
             echo -e "${BLUE}🔧 Installing Debian/Ubuntu dependencies...${NC}"
+            
+            # Check if we're root or can use sudo
+            SUDO_CMD=""
+            if [ "$EUID" -ne 0 ]; then
+                if command -v sudo >/dev/null 2>&1; then
+                    SUDO_CMD="sudo"
+                else
+                    echo -e "${RED}❌ Not running as root and sudo not available${NC}"
+                    echo -e "${YELLOW}💡 Please run as root or install sudo${NC}"
+                    return 1
+                fi
+            fi
+            
+            # Essential packages for dependency detection
+            ESSENTIAL_DEPS=()
+            if ! command -v pkg-config >/dev/null 2>&1; then
+                ESSENTIAL_DEPS+=("pkg-config")
+            fi
+            if ! command -v git >/dev/null 2>&1; then
+                ESSENTIAL_DEPS+=("git")
+            fi
+            
+            if [ ${#ESSENTIAL_DEPS[@]} -gt 0 ]; then
+                echo -e "${BLUE}📦 Installing essential tools: ${ESSENTIAL_DEPS[*]}${NC}"
+                $SUDO_CMD apt update
+                $SUDO_CMD apt install -y "${ESSENTIAL_DEPS[@]}"
+            fi
+            
+            # Check Python version and install 3.11 if needed on Ubuntu
+            if ! check_python_version; then
+                if [[ "$ID" == "ubuntu" ]] && [[ "$UBUNTU_VERSION" == "22.04" ]]; then
+                    echo -e "${YELLOW}🐍 Ubuntu 22.04 detected with Python < 3.11${NC}"
+                    read -p "Install Python 3.11? (Y/n): " -r
+                    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                        if ! install_python311_ubuntu; then
+                            echo -e "${RED}❌ Failed to install Python 3.11${NC}"
+                            return 1
+                        fi
+                    else
+                        echo -e "${YELLOW}⚠️ Continuing with Python $PYTHON_VERSION - may cause issues${NC}"
+                        PYTHON_CMD="python3"
+                    fi
+                else
+                    echo -e "${YELLOW}⚠️ Python 3.11+ not found. Open WebUI requires Python 3.11+${NC}"
+                    PYTHON_CMD="python3"
+                fi
+            fi
+            
+            # PostgreSQL and development dependencies
             DEPS_NEEDED=()
-            if ! pkg-config --exists libpq; then
+            if ! pkg-config --exists libpq 2>/dev/null; then
                 DEPS_NEEDED+=("libpq-dev")
             fi
             if ! command -v gcc >/dev/null 2>&1; then
                 DEPS_NEEDED+=("build-essential")
             fi
-            if ! pkg-config --exists python3; then
-                DEPS_NEEDED+=("python3-dev")
-            fi
-            if ! command -v git >/dev/null 2>&1; then
-                DEPS_NEEDED+=("git")
+            
+            # Python development headers for the correct Python version
+            if [[ "$PYTHON_CMD" == "python3.11" ]]; then
+                if ! dpkg -l | grep -q python3.11-dev; then
+                    DEPS_NEEDED+=("python3.11-dev")
+                fi
+            else
+                if ! pkg-config --exists python3 2>/dev/null; then
+                    DEPS_NEEDED+=("python3-dev")
+                fi
             fi
             
             if [ ${#DEPS_NEEDED[@]} -gt 0 ]; then
@@ -135,8 +280,8 @@ install_system_deps() {
                 read -p "Install missing dependencies? (Y/n): " -r
                 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
                     echo -e "${BLUE}⚙️ Installing dependencies...${NC}"
-                    sudo apt update
-                    sudo apt install -y "${DEPS_NEEDED[@]}"
+                    $SUDO_CMD apt update
+                    $SUDO_CMD apt install -y "${DEPS_NEEDED[@]}"
                     echo -e "${GREEN}✅ Dependencies installed${NC}"
                 else
                     echo -e "${YELLOW}⚠️ Skipping system dependencies${NC}"
@@ -166,6 +311,7 @@ install_system_deps() {
         *)
             echo -e "${YELLOW}⚠️ Unknown OS. Manual dependency installation may be required.${NC}"
             echo -e "${YELLOW}Required: PostgreSQL development headers, Python development headers, C compiler${NC}"
+            check_python_version
             ;;
     esac
 }
@@ -176,6 +322,22 @@ install_system_deps() {
 
 setup_python_env() {
     echo -e "${BLUE}🐍 Setting up Python environment...${NC}"
+    
+    # Ensure we have a Python command set
+    if [ -z "$PYTHON_CMD" ]; then
+        if command -v python3.11 >/dev/null 2>&1; then
+            PYTHON_CMD="python3.11"
+        elif command -v python3 >/dev/null 2>&1; then
+            PYTHON_CMD="python3"
+        else
+            echo -e "${RED}❌ No suitable Python found${NC}"
+            exit 1
+        fi
+    fi
+    
+    echo -e "${BLUE}   Using Python command: $PYTHON_CMD${NC}"
+    PYTHON_VERSION=$($PYTHON_CMD --version 2>&1)
+    echo -e "${BLUE}   Python version: $PYTHON_VERSION${NC}"
     
     # Check if conda is available
     if command -v conda >/dev/null 2>&1; then
@@ -212,6 +374,7 @@ setup_python_env() {
             if [[ "$CONDA_DEFAULT_ENV" == "$ENV_NAME" ]]; then
                 echo -e "${GREEN}✅ Environment '$ENV_NAME' activated successfully${NC}"
                 USING_CONDA=true
+                PYTHON_CMD="python"  # In conda env, use 'python'
             else
                 echo -e "${RED}❌ Failed to activate environment${NC}"
                 echo -e "${YELLOW}💡 Continuing with system Python${NC}"
@@ -225,11 +388,11 @@ setup_python_env() {
         USING_CONDA=false
         
         # Check if venv is available
-        if python3 -m venv --help >/dev/null 2>&1; then
+        if $PYTHON_CMD -m venv --help >/dev/null 2>&1; then
             read -p "Create a virtual environment? (Y/n): " -r
             if [[ ! $REPLY =~ ^[Nn]$ ]]; then
                 echo -e "${BLUE}🔧 Creating and activating virtual environment...${NC}"
-                python3 -m venv venv
+                $PYTHON_CMD -m venv venv
                 
                 # Activate venv
                 source venv/bin/activate
@@ -237,6 +400,7 @@ setup_python_env() {
                 if [[ "$VIRTUAL_ENV" ]]; then
                     echo -e "${GREEN}✅ Virtual environment activated${NC}"
                     USING_VENV=true
+                    PYTHON_CMD="python"  # In venv, use 'python'
                 else
                     echo -e "${RED}❌ Failed to activate virtual environment${NC}"
                     USING_VENV=false
@@ -273,30 +437,30 @@ install_backend_deps() {
         echo -e "${BLUE}🐍 Using system Python${NC}"
     fi
     
-    PYTHON_VERSION=$(python --version 2>&1 || python3 --version 2>&1)
+    PYTHON_VERSION=$($PYTHON_CMD --version 2>&1)
     echo -e "${BLUE}   Python version: $PYTHON_VERSION${NC}"
     
     # Mise à jour de pip
     echo -e "${BLUE}🔄 Updating pip...${NC}"
-    python -m pip install --upgrade pip
+    $PYTHON_CMD -m pip install --upgrade pip
     
     # Installation des dépendances
     echo -e "${BLUE}📋 Installing from: $REQUIREMENTS_FILE${NC}"
     echo -e "${BLUE}   (This may take several minutes...)${NC}"
     
-    if python -m pip install -r "$REQUIREMENTS_FILE"; then
+    if $PYTHON_CMD -m pip install -r "$REQUIREMENTS_FILE"; then
         echo -e "${GREEN}✅ Backend dependencies installed successfully${NC}"
     else
         echo -e "${RED}❌ Failed to install some dependencies${NC}"
         echo -e "${YELLOW}💡 Common solutions:${NC}"
         echo -e "${YELLOW}   - Install missing system dependencies${NC}"
-        echo -e "${YELLOW}   - Update pip: python -m pip install --upgrade pip${NC}"
+        echo -e "${YELLOW}   - Update pip: $PYTHON_CMD -m pip install --upgrade pip${NC}"
         echo -e "${YELLOW}   - Try with --no-cache-dir flag${NC}"
         
         read -p "Try installation with --no-cache-dir? (Y/n): " -r
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
             echo -e "${BLUE}🔄 Retrying with --no-cache-dir...${NC}"
-            if python -m pip install --no-cache-dir -r "$REQUIREMENTS_FILE"; then
+            if $PYTHON_CMD -m pip install --no-cache-dir -r "$REQUIREMENTS_FILE"; then
                 echo -e "${GREEN}✅ Dependencies installed with --no-cache-dir${NC}"
             else
                 echo -e "${RED}❌ Installation failed even with --no-cache-dir${NC}"
@@ -329,10 +493,10 @@ setup_configuration() {
             echo -e "${BLUE}📝 Creating basic .env configuration...${NC}"
             cat > "$PROJECT_ROOT/.env" << 'EOF'
 # API-DOC-IA Configuration
-WEBUI_AUTH=True
-API_V2_ENABLED=True
-ENABLE_SIGNUP=False
-DEBUG=False
+WEBUI_AUTH=true
+ENABLE_SIGNUP=true
+API_V2_ENABLED=true
+DEBUG=false
 
 # Database (SQLite by default)
 DATABASE_URL=sqlite:///./webui.db
@@ -371,7 +535,7 @@ verify_installation() {
     echo -e "${BLUE}🧪 Verifying installation...${NC}"
     
     # Test Python imports with detailed feedback
-    python -c "
+    $PYTHON_CMD -c "
 import sys
 sys.path.insert(0, '$BACKEND_PATH')
 
@@ -444,6 +608,7 @@ main() {
     # Initialize environment tracking variables
     USING_CONDA=false
     USING_VENV=false
+    PYTHON_CMD=""
     
     # Check requirements file
     if [ ! -f "$REQUIREMENTS_FILE" ]; then
@@ -461,7 +626,7 @@ main() {
     detect_os
     echo ""
     
-    # System dependencies
+    # System dependencies (includes Python 3.11 check for Ubuntu)
     install_system_deps
     echo ""
     

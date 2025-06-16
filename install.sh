@@ -156,46 +156,26 @@ except:
     
     echo -e "${BLUE}   Current SQLite: ${CURRENT_SQLITE:-unknown}${NC}"
     
-    # Test 3: ChromaDB compatibility (graceful)
-    CHROMADB_TEST_RESULT=$(python3 -c "
-try:
-    import chromadb
-    client = chromadb.Client()
-    print('compatible')
-except ImportError:
-    print('not_installed')
-except Exception as e:
-    if 'sqlite3' in str(e).lower() and '3.35' in str(e):
-        print('sqlite_version_issue')
-    else:
-        print('other_issue')
-" 2>/dev/null || echo "test_failed")
-    
-    echo -e "${BLUE}   ChromaDB status: ${CHROMADB_TEST_RESULT:-unknown}${NC}"
-    
-    # Decision matrix based on current state
-    case "$CHROMADB_TEST_RESULT" in
-        "compatible")
-            echo -e "${GREEN}✅ ChromaDB already working, no SQLite changes needed${NC}"
-            CHROMADB_STATUS="working"
-            return 0
-            ;;
-        "sqlite_version_issue")
-            echo -e "${YELLOW}⚠️ SQLite version issue detected for ChromaDB${NC}"
-            CHROMADB_STATUS="sqlite_issue"
+    # Test 3: Version compatibility check (MAIN LOGIC)
+    if [ "$CURRENT_SQLITE" != "unknown" ]; then
+        # Parse version (format: "3.34.1")
+        SQLITE_MAJOR=$(echo "$CURRENT_SQLITE" | cut -d. -f1)
+        SQLITE_MINOR=$(echo "$CURRENT_SQLITE" | cut -d. -f2)
+        
+        if [ "$SQLITE_MAJOR" -eq 3 ] && [ "$SQLITE_MINOR" -lt 35 ]; then
+            echo -e "${YELLOW}⚠️ SQLite $CURRENT_SQLITE < 3.35.0 - ChromaDB requires upgrade${NC}"
+            CHROMADB_STATUS="sqlite_too_old"
             return 1
-            ;;
-        "not_installed")
-            echo -e "${BLUE}💡 ChromaDB not yet installed, will verify after installation${NC}"
-            CHROMADB_STATUS="pending"
+        else
+            echo -e "${GREEN}✅ SQLite $CURRENT_SQLITE >= 3.35.0 - Compatible with ChromaDB${NC}"
+            CHROMADB_STATUS="sqlite_compatible"
             return 0
-            ;;
-        *)
-            echo -e "${BLUE}💡 ChromaDB status unclear, will attempt best configuration${NC}"
-            CHROMADB_STATUS="unclear"
-            return 1
-            ;;
-    esac
+        fi
+    else
+        echo -e "${YELLOW}⚠️ Cannot determine SQLite version${NC}"
+        CHROMADB_STATUS="sqlite_unknown"
+        return 1
+    fi
 }
 
 # =============================================================================
@@ -622,54 +602,87 @@ install_system_deps() {
                     fi
                 fi
                 
-                # SQLite compatibility check for Rocky/RHEL 9
-                if ! detect_sqlite_requirements_safely; then
-                    if [ "$FORCE_SQLITE_COMPILATION" = "true" ] || [ "$CHROMADB_STATUS" = "sqlite_issue" ]; then
-                        echo -e "${YELLOW}⚠️ Rocky/RHEL 9 requires SQLite 3.35+ for ChromaDB${NC}"
-                        echo -e "${YELLOW}   Current SQLite may be incompatible${NC}"
-                        echo ""
-                        echo -e "${BLUE}Options available:${NC}"
-                        echo -e "${BLUE}  1. Compile SQLite 3.45+ (recommended, safe, 5-10 min)${NC}"
-                        echo -e "${BLUE}  2. Skip ChromaDB features (limited functionality)${NC}"
-                        echo -e "${BLUE}  3. Continue anyway (may fail later)${NC}"
-                        echo ""
-                        
-                        if [ "$SQLITE_FALLBACK_STRATEGY" = "graceful" ]; then
-                            read -p "Choose option (1/2/3): " -r SQLITE_CHOICE
-                        else
-                            SQLITE_CHOICE="1"  # Auto-compile in strict mode
-                        fi
-                        
-                        case $SQLITE_CHOICE in
-                            1)
-                                create_safety_backup
-                                if compile_sqlite_safely; then
-                                    echo -e "${GREEN}✅ SQLite compilation successful${NC}"
-                                    CUSTOM_SQLITE_COMPILED=true
-                                else
-                                    echo -e "${RED}❌ SQLite compilation failed${NC}"
-                                    if [ "$SQLITE_FALLBACK_STRATEGY" = "graceful" ]; then
-                                        echo -e "${YELLOW}💡 Continuing with limited functionality${NC}"
-                                        restore_from_backup
-                                    else
-                                        echo -e "${RED}❌ Installation stopped due to SQLite compilation failure${NC}"
-                                        restore_from_backup
-                                        return 1
-                                    fi
-                                fi
-                                ;;
-                            2)
-                                echo -e "${YELLOW}⚠️ Skipping ChromaDB features${NC}"
-                                echo "SKIP_CHROMADB=true" >> "$PROJECT_ROOT/.env" 2>/dev/null || true
-                                ;;
-                            3)
-                                echo -e "${YELLOW}⚠️ Continuing with potential ChromaDB issues${NC}"
-                                ;;
-                            *)
-                                echo -e "${YELLOW}⚠️ Invalid choice, continuing anyway${NC}"
-                                ;;
-                        esac
+                # SQLite compatibility check for Rocky/RHEL 9 (ALWAYS CHECK)
+                echo -e "${BLUE}🔍 Checking SQLite compatibility for Rocky/RHEL 9...${NC}"
+                
+                # Get current SQLite version
+                CURRENT_SQLITE=$(python3 -c "
+try:
+    import sqlite3
+    print(sqlite3.sqlite_version)
+except:
+    print('unknown')
+" 2>/dev/null || echo "unknown")
+                
+                echo -e "${BLUE}   Current SQLite: ${CURRENT_SQLITE}${NC}"
+                
+                # Check if SQLite needs upgrade
+                NEEDS_SQLITE_UPGRADE=false
+                if [ "$CURRENT_SQLITE" != "unknown" ]; then
+                    SQLITE_MAJOR=$(echo "$CURRENT_SQLITE" | cut -d. -f1)
+                    SQLITE_MINOR=$(echo "$CURRENT_SQLITE" | cut -d. -f2)
+                    
+                    if [ "$SQLITE_MAJOR" -eq 3 ] && [ "$SQLITE_MINOR" -lt 35 ]; then
+                        NEEDS_SQLITE_UPGRADE=true
                     fi
+                else
+                    NEEDS_SQLITE_UPGRADE=true  # Unknown version, better upgrade
+                fi
+                
+                # Propose SQLite compilation if needed or forced
+                if [ "$NEEDS_SQLITE_UPGRADE" = "true" ] || [ "$FORCE_SQLITE_COMPILATION" = "true" ]; then
+                    echo -e "${YELLOW}⚠️ Rocky/RHEL 9: SQLite upgrade needed for full ChromaDB compatibility${NC}"
+                    echo -e "${YELLOW}   Current: SQLite $CURRENT_SQLITE < 3.35.0 required${NC}"
+                    echo ""
+                    echo -e "${BLUE}Choose an option:${NC}"
+                    echo -e "${BLUE}  1. Compile SQLite 3.45+ (RECOMMENDED - ensures full functionality, 5-10 min) ✅${NC}"
+                    echo -e "${BLUE}  2. Continue with current SQLite (may have limited ChromaDB features) ⚠️${NC}"
+                    echo ""
+                    
+                    if [ "$SQLITE_FALLBACK_STRATEGY" = "graceful" ]; then
+                        read -p "Choose option (1/2) [default: 1]: " -r SQLITE_CHOICE
+                        SQLITE_CHOICE=${SQLITE_CHOICE:-1}  # Default to 1 if empty
+                    else
+                        SQLITE_CHOICE="1"  # Auto-compile in strict mode
+                        echo -e "${BLUE}Auto-selecting option 1 (strict mode)${NC}"
+                    fi
+                    
+                    case $SQLITE_CHOICE in
+                        1)
+                            echo -e "${BLUE}🔧 Starting SQLite 3.45+ compilation...${NC}"
+                            create_safety_backup
+                            if compile_sqlite_safely; then
+                                echo -e "${GREEN}✅ SQLite compilation successful - ChromaDB fully supported${NC}"
+                                CUSTOM_SQLITE_COMPILED=true
+                            else
+                                echo -e "${RED}❌ SQLite compilation failed${NC}"
+                                if [ "$SQLITE_FALLBACK_STRATEGY" = "graceful" ]; then
+                                    echo -e "${YELLOW}💡 Continuing with current SQLite (limited functionality)${NC}"
+                                    restore_from_backup
+                                else
+                                    echo -e "${RED}❌ Installation stopped due to SQLite compilation failure${NC}"
+                                    restore_from_backup
+                                    return 1
+                                fi
+                            fi
+                            ;;
+                        2)
+                            echo -e "${YELLOW}⚠️ Continuing with current SQLite - ChromaDB features may be limited${NC}"
+                            echo -e "${YELLOW}   You can upgrade later by running: FORCE_SQLITE_COMPILATION=true ./install.sh${NC}"
+                            ;;
+                        *)
+                            echo -e "${YELLOW}⚠️ Invalid choice, defaulting to option 1 (compilation)${NC}"
+                            create_safety_backup
+                            if compile_sqlite_safely; then
+                                echo -e "${GREEN}✅ SQLite compilation successful${NC}"
+                                CUSTOM_SQLITE_COMPILED=true
+                            else
+                                restore_from_backup
+                            fi
+                            ;;
+                    esac
+                else
+                    echo -e "${GREEN}✅ SQLite $CURRENT_SQLITE is compatible with ChromaDB${NC}"
                 fi
             fi
             

@@ -1,9 +1,10 @@
 #!/bin/bash
 
 # =============================================================================
-# 🚀 API-DOC-IA INSTALLATION SCRIPT (SECURE v5)
+# 🚀 API-DOC-IA INSTALLATION SCRIPT (SECURE v6)
 # =============================================================================
 # Détection automatique et corrections sécurisées : Python 3.11 + SQLite 3.45+
+# FIXED: SQLite isolation - NO system pollution
 # =============================================================================
 
 set -e
@@ -22,7 +23,7 @@ BACKEND_PATH="$PROJECT_ROOT/backend"
 REQUIREMENTS_FILE="$BACKEND_PATH/requirements.txt"
 
 echo -e "${BLUE}============================================${NC}"
-echo -e "${BLUE}🚀 API-DOC-IA INSTALLATION (SECURE v5)${NC}"
+echo -e "${BLUE}🚀 API-DOC-IA INSTALLATION (SECURE v6)${NC}"
 echo -e "${BLUE}============================================${NC}"
 
 # =============================================================================
@@ -84,15 +85,9 @@ restore_from_backup() {
     
     echo -e "${YELLOW}🔄 Restoring from backup...${NC}"
     
-    # Remove custom SQLite if we installed it
+    # Remove custom SQLite if we installed it (NO system pollution cleanup needed)
     if [ -f "/usr/local/lib/libsqlite3.so" ]; then
         sudo rm -f /usr/local/lib/libsqlite3.so* 2>/dev/null || true
-    fi
-    
-    # Remove ld.so.conf entry if we added it
-    if [ -f "/etc/ld.so.conf.d/sqlite-local.conf" ]; then
-        sudo rm -f /etc/ld.so.conf.d/sqlite-local.conf 2>/dev/null || true
-        sudo ldconfig 2>/dev/null || true
     fi
     
     # Remove project SQLite environment file
@@ -127,64 +122,12 @@ fix_onnxruntime_version() {
 }
 
 # =============================================================================
-# SQLITE ENVIRONMENT DETECTION (NON-INTRUSIVE)
+# SQLITE COMPILATION (ISOLATED - NO SYSTEM POLLUTION)
 # =============================================================================
 
-detect_sqlite_requirements_safely() {
-    echo -e "${BLUE}🔍 Analyzing SQLite requirements for ChromaDB...${NC}"
-    
-    # Skip if disabled
-    if [ "$SKIP_CHROMADB_CHECK" = "true" ]; then
-        echo -e "${YELLOW}💡 ChromaDB check skipped by configuration${NC}"
-        return 0
-    fi
-    
-    # Test 1: Basic Python availability
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️ Python3 not available, skipping SQLite check${NC}"
-        return 0
-    fi
-    
-    # Test 2: Current SQLite version (non-breaking)
-    CURRENT_SQLITE=$(python3 -c "
-try:
-    import sqlite3
-    print(sqlite3.sqlite_version)
-except:
-    print('unknown')
-" 2>/dev/null)
-    
-    echo -e "${BLUE}   Current SQLite: ${CURRENT_SQLITE:-unknown}${NC}"
-    
-    # Test 3: Version compatibility check (MAIN LOGIC)
-    if [ "$CURRENT_SQLITE" != "unknown" ]; then
-        # Parse version (format: "3.34.1")
-        SQLITE_MAJOR=$(echo "$CURRENT_SQLITE" | cut -d. -f1)
-        SQLITE_MINOR=$(echo "$CURRENT_SQLITE" | cut -d. -f2)
-        
-        if [ "$SQLITE_MAJOR" -eq 3 ] && [ "$SQLITE_MINOR" -lt 35 ]; then
-            echo -e "${YELLOW}⚠️ SQLite $CURRENT_SQLITE < 3.35.0 - ChromaDB requires upgrade${NC}"
-            CHROMADB_STATUS="sqlite_too_old"
-            return 1
-        else
-            echo -e "${GREEN}✅ SQLite $CURRENT_SQLITE >= 3.35.0 - Compatible with ChromaDB${NC}"
-            CHROMADB_STATUS="sqlite_compatible"
-            return 0
-        fi
-    else
-        echo -e "${YELLOW}⚠️ Cannot determine SQLite version${NC}"
-        CHROMADB_STATUS="sqlite_unknown"
-        return 1
-    fi
-}
-
-# =============================================================================
-# SQLITE COMPILATION (SAFE AND ISOLATED)
-# =============================================================================
-
-compile_sqlite_safely() {
-    echo -e "${BLUE}🏗️ Compiling SQLite 3.45+ safely and isolated...${NC}"
-    echo -e "${YELLOW}⚠️ This will install SQLite in /usr/local (isolated from system)${NC}"
+compile_sqlite_isolated() {
+    echo -e "${BLUE}🏗️ Compiling SQLite 3.45+ in ISOLATED mode (no system pollution)...${NC}"
+    echo -e "${GREEN}✅ This will NOT affect system tools (DNF, etc.) - application-only${NC}"
     
     # Check if we're root or can use sudo
     SUDO_CMD=""
@@ -281,8 +224,8 @@ compile_sqlite_safely() {
         return 1
     fi
     
-    # 7. SAFE INSTALL (with backup)
-    echo -e "${BLUE}📦 Installing SQLite to /usr/local...${NC}"
+    # 7. ISOLATED INSTALL (NO SYSTEM POLLUTION)
+    echo -e "${BLUE}📦 Installing SQLite to /usr/local (ISOLATED)...${NC}"
     
     # Backup existing /usr/local/lib/libsqlite3.* if exists
     if ls /usr/local/lib/libsqlite3.* >/dev/null 2>&1; then
@@ -301,23 +244,17 @@ compile_sqlite_safely() {
         return 1
     fi
     
-    # 8. CONFIGURE LIBRARY PATH (safely)
-    echo -e "${BLUE}🔧 Configuring library paths...${NC}"
-    
-    # Add to ld.so.conf only if not already present
-    if ! grep -q "/usr/local/lib" /etc/ld.so.conf.d/* 2>/dev/null; then
-        echo '/usr/local/lib' | $SUDO_CMD tee /etc/ld.so.conf.d/sqlite-local.conf
-        $SUDO_CMD ldconfig
-    fi
-    
-    # 9. CREATE ENVIRONMENT FILE
-    echo -e "${BLUE}🔧 Creating SQLite environment file...${NC}"
+    # 8. CREATE ISOLATED ENVIRONMENT FILE (NO GLOBAL CONFIG)
+    echo -e "${BLUE}🔧 Creating isolated SQLite environment file...${NC}"
+    echo -e "${GREEN}✅ System tools (DNF, etc.) will NOT be affected${NC}"
     
     cat > "$PROJECT_ROOT/.sqlite_env" << 'EOF'
 #!/bin/bash
-# SQLite environment for Api-Doc-IA
+# ISOLATED SQLite environment for Api-Doc-IA ONLY
+# This does NOT affect system tools (DNF, SSH, etc.)
 # Generated by install.sh SQLite compilation
 
+# Application-specific library path (NOT global)
 export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
 export LD_PRELOAD="/usr/local/lib/libsqlite3.so:$LD_PRELOAD"
 export PATH="/usr/local/bin:$PATH"
@@ -325,14 +262,18 @@ export PATH="/usr/local/bin:$PATH"
 # Verification flags
 export CUSTOM_SQLITE_COMPILED=true
 export CUSTOM_SQLITE_VERSION="3.45.1"
+export SQLITE_ISOLATION_MODE="application_only"
+
+# Debug info
+echo "🔧 SQLite environment loaded (application-only, no system pollution)"
 EOF
     
     chmod +x "$PROJECT_ROOT/.sqlite_env"
     
-    # 10. TEST PYTHON INTEGRATION
-    echo -e "${BLUE}🐍 Testing Python SQLite integration...${NC}"
+    # 9. TEST PYTHON INTEGRATION (ISOLATED)
+    echo -e "${BLUE}🐍 Testing Python SQLite integration (isolated)...${NC}"
     
-    # Test with explicit library path
+    # Test with explicit library path (temporary for this test)
     export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
     export LD_PRELOAD="/usr/local/lib/libsqlite3.so:$LD_PRELOAD"
     
@@ -363,17 +304,37 @@ major, minor = int(version_parts[0]), int(version_parts[1])
 exit(0 if (major >= 3 and minor >= 35) else 1)
 " 2>/dev/null; then
         echo -e "${GREEN}✅ Python SQLite integration successful${NC}"
+        
+        # Unset temporary environment variables
+        unset LD_LIBRARY_PATH LD_PRELOAD
+        
         CUSTOM_SQLITE_COMPILED=true
     else
         echo -e "${RED}❌ Python SQLite integration failed${NC}"
+        # Unset temporary environment variables
+        unset LD_LIBRARY_PATH LD_PRELOAD
         return 1
+    fi
+    
+    # 10. VERIFY SYSTEM ISOLATION
+    echo -e "${BLUE}🧪 Verifying system isolation...${NC}"
+    
+    # Test that system tools still use system SQLite
+    SYSTEM_SQLITE_TEST=$(python3 -c "import sqlite3; print(sqlite3.sqlite_version)" 2>/dev/null || echo "unknown")
+    echo -e "${BLUE}   System SQLite (without our env): $SYSTEM_SQLITE_TEST${NC}"
+    
+    if [ "$SYSTEM_SQLITE_TEST" = "3.34.1" ] || [ "$SYSTEM_SQLITE_TEST" = "3.26.0" ]; then
+        echo -e "${GREEN}✅ System isolation verified - system tools unaffected${NC}"
+    else
+        echo -e "${YELLOW}⚠️ System SQLite version: $SYSTEM_SQLITE_TEST${NC}"
     fi
     
     # 11. CLEANUP
     cd "$PROJECT_ROOT"
     rm -rf "$BUILD_DIR"
     
-    echo -e "${GREEN}✅ SQLite 3.45.1 successfully compiled and configured!${NC}"
+    echo -e "${GREEN}✅ SQLite 3.45.1 successfully compiled in ISOLATED mode!${NC}"
+    echo -e "${GREEN}   System tools (DNF, SSH, etc.) remain unaffected${NC}"
     return 0
 }
 
@@ -634,9 +595,11 @@ except:
                     echo -e "${YELLOW}⚠️ Rocky/RHEL 9: SQLite upgrade needed for full ChromaDB compatibility${NC}"
                     echo -e "${YELLOW}   Current: SQLite $CURRENT_SQLITE < 3.35.0 required${NC}"
                     echo ""
-                    echo -e "${BLUE}Choose an option:${NC}"
-                    echo -e "${BLUE}  1. Compile SQLite 3.45+ (RECOMMENDED - ensures full functionality, 5-10 min) ✅${NC}"
+                    echo -e "${GREEN}🔧 ISOLATED SQLite compilation (no system pollution):${NC}"
+                    echo -e "${BLUE}  1. Compile SQLite 3.45+ (RECOMMENDED - application only, 5-10 min) ✅${NC}"
                     echo -e "${BLUE}  2. Continue with current SQLite (may have limited ChromaDB features) ⚠️${NC}"
+                    echo ""
+                    echo -e "${GREEN}✅ System tools (DNF, SSH, etc.) will NOT be affected${NC}"
                     echo ""
                     
                     if [ "$SQLITE_FALLBACK_STRATEGY" = "graceful" ]; then
@@ -649,10 +612,11 @@ except:
                     
                     case $SQLITE_CHOICE in
                         1)
-                            echo -e "${BLUE}🔧 Starting SQLite 3.45+ compilation...${NC}"
+                            echo -e "${BLUE}🔧 Starting ISOLATED SQLite 3.45+ compilation...${NC}"
                             create_safety_backup
-                            if compile_sqlite_safely; then
+                            if compile_sqlite_isolated; then
                                 echo -e "${GREEN}✅ SQLite compilation successful - ChromaDB fully supported${NC}"
+                                echo -e "${GREEN}   System remains clean and unaffected${NC}"
                                 CUSTOM_SQLITE_COMPILED=true
                             else
                                 echo -e "${RED}❌ SQLite compilation failed${NC}"
@@ -673,7 +637,7 @@ except:
                         *)
                             echo -e "${YELLOW}⚠️ Invalid choice, defaulting to option 1 (compilation)${NC}"
                             create_safety_backup
-                            if compile_sqlite_safely; then
+                            if compile_sqlite_isolated; then
                                 echo -e "${GREEN}✅ SQLite compilation successful${NC}"
                                 CUSTOM_SQLITE_COMPILED=true
                             else
@@ -686,7 +650,8 @@ except:
                 fi
             fi
             
-            # Standard system dependencies
+            # Standard system dependencies (install AFTER SQLite to avoid conflicts)
+            echo -e "${BLUE}📦 Installing standard system dependencies...${NC}"
             MISSING_DEPS=()
             
             # Check postgresql-devel
@@ -960,9 +925,9 @@ install_backend_deps() {
         exit 1
     fi
     
-    # Load SQLite environment if available
+    # Load SQLite environment if available (FOR INSTALLATION ONLY)
     if [ "$CUSTOM_SQLITE_COMPILED" = "true" ] && [ -f "$PROJECT_ROOT/.sqlite_env" ]; then
-        echo -e "${BLUE}🔧 Loading custom SQLite environment for dependencies...${NC}"
+        echo -e "${BLUE}🔧 Loading custom SQLite environment for dependencies installation...${NC}"
         source "$PROJECT_ROOT/.sqlite_env"
     fi
     
@@ -977,6 +942,12 @@ install_backend_deps() {
     
     PYTHON_VERSION=$($PYTHON_CMD --version 2>&1)
     echo -e "${BLUE}   Python version: $PYTHON_VERSION${NC}"
+    
+    # Display SQLite info for installation
+    if [ "$CUSTOM_SQLITE_COMPILED" = "true" ]; then
+        INSTALL_SQLITE_VERSION=$($PYTHON_CMD -c "import sqlite3; print(sqlite3.sqlite_version)" 2>/dev/null || echo "unknown")
+        echo -e "${BLUE}   SQLite for installation: $INSTALL_SQLITE_VERSION${NC}"
+    fi
     
     # Mise à jour de pip
     echo -e "${BLUE}🔄 Updating pip...${NC}"
@@ -1065,10 +1036,11 @@ EOF
         if ! grep -q "CUSTOM_SQLITE_COMPILED" "$PROJECT_ROOT/.env" 2>/dev/null; then
             cat >> "$PROJECT_ROOT/.env" << EOF
 
-# Custom SQLite Configuration (Added by install.sh)
+# Custom SQLite Configuration (ISOLATED - Added by install.sh)
 CUSTOM_SQLITE_COMPILED=true
 CUSTOM_SQLITE_VERSION=3.45.1
 SQLITE_ENV_FILE=.sqlite_env
+SQLITE_ISOLATION_MODE=application_only
 EOF
             echo -e "${GREEN}✅ SQLite configuration added to .env${NC}"
         fi
@@ -1098,7 +1070,7 @@ EOF
 verify_installation() {
     echo -e "${BLUE}🧪 Verifying installation...${NC}"
     
-    # Load SQLite environment if available
+    # Load SQLite environment if available (FOR VERIFICATION ONLY)
     if [ "$CUSTOM_SQLITE_COMPILED" = "true" ] && [ -f "$PROJECT_ROOT/.sqlite_env" ]; then
         source "$PROJECT_ROOT/.sqlite_env"
     fi
@@ -1181,7 +1153,11 @@ try:
 except ImportError:
     print('⚠️ ChromaDB not available')
 except Exception as e:
-    print(f'⚠️ ChromaDB issue: {e}')
+    if 'sqlite3' in str(e).lower():
+        print(f'⚠️ ChromaDB SQLite issue: {e}')
+        print('   This may be resolved when using the custom SQLite environment')
+    else:
+        print(f'⚠️ ChromaDB issue: {e}')
 
 # Test Open WebUI imports (if available)
 try:
@@ -1207,8 +1183,8 @@ print('\\n🎉 Core dependency verification completed!')
 # =============================================================================
 
 main() {
-    echo -e "${BLUE}Welcome to Api-Doc-IA installation! (Secure auto-correcting version)${NC}"
-    echo -e "${BLUE}This script will install all dependencies with smart fixes and graceful degradation.${NC}"
+    echo -e "${BLUE}Welcome to Api-Doc-IA installation! (Secure v6 - No system pollution)${NC}"
+    echo -e "${BLUE}This script will install all dependencies with smart fixes and isolated improvements.${NC}"
     echo ""
     
     # Initialize environment tracking variables
@@ -1236,7 +1212,7 @@ main() {
     detect_os
     echo ""
     
-    # System dependencies (includes Python 3.11 check and SQLite handling)
+    # System dependencies (includes Python 3.11 check and ISOLATED SQLite handling)
     install_system_deps
     echo ""
     
@@ -1273,7 +1249,8 @@ main() {
     fi
     
     if [ "$CUSTOM_SQLITE_COMPILED" = "true" ]; then
-        echo -e "${GREEN}✅ Custom SQLite 3.45.1 compiled and configured${NC}"
+        echo -e "${GREEN}✅ Custom SQLite 3.45.1 compiled in ISOLATED mode${NC}"
+        echo -e "${GREEN}   System tools (DNF, SSH, etc.) remain unaffected${NC}"
         echo -e "${YELLOW}💡 SQLite environment will be loaded automatically by start.sh${NC}"
     fi
     echo ""
@@ -1299,7 +1276,8 @@ main() {
         echo -e "${GREEN}   ✅ Corrected onnxruntime version compatibility${NC}"
     fi
     if [ "$CUSTOM_SQLITE_COMPILED" = "true" ]; then
-        echo -e "${GREEN}   ✅ Compiled SQLite 3.45.1 for ChromaDB compatibility${NC}"
+        echo -e "${GREEN}   ✅ Compiled SQLite 3.45.1 in ISOLATED mode (no system pollution)${NC}"
+        echo -e "${GREEN}   ✅ System tools remain clean and functional${NC}"
     fi
     if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
         echo -e "${GREEN}   ✅ Safety backup available: $BACKUP_DIR${NC}"

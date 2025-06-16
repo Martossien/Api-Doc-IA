@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # =============================================================================
-# 🚀 API-DOC-IA UNIVERSAL STARTUP SCRIPT (CORRECTED)
+# 🚀 API-DOC-IA UNIVERSAL STARTUP SCRIPT (SECURE v2)
 # =============================================================================
-# Fixed: Auto-activate conda + use local source code
+# Auto-activate conda + use local source code + custom SQLite support
 # =============================================================================
 
 set -e
@@ -23,8 +23,28 @@ LOG_FILE="$PROJECT_ROOT/api_doc_ia.log"
 PID_FILE="$PROJECT_ROOT/api_doc_ia.pid"
 
 echo -e "${BLUE}============================================${NC}"
-echo -e "${BLUE}🚀 API-DOC-IA STARTUP${NC}"
+echo -e "${BLUE}🚀 API-DOC-IA STARTUP (SECURE v2)${NC}"
 echo -e "${BLUE}============================================${NC}"
+
+# =============================================================================
+# CONFIGURATION VARIABLES WITH SAFE DEFAULTS
+# =============================================================================
+
+# User-configurable options (can be overridden via environment)
+: "${SQLITE_ENV_FILE:=$PROJECT_ROOT/.sqlite_env}"
+: "${ENABLE_SQLITE_VALIDATION:=true}"
+: "${SQLITE_FALLBACK_STRATEGY:=graceful}"  # graceful|strict|disabled
+: "${CUSTOM_SQLITE_VALIDATION_TIMEOUT:=10}"
+: "${SKIP_ENVIRONMENT_DETECTION:=false}"
+: "${FORCE_SYSTEM_SQLITE:=false}"
+
+# Internal state variables
+USING_CONDA_ENV=false
+USING_VENV=false
+CUSTOM_SQLITE_LOADED=false
+SQLITE_STATUS="unknown"
+CHROMADB_STATUS="unknown"
+PYTHON_VERSION=""
 
 # Cleanup function
 cleanup() {
@@ -48,6 +68,13 @@ trap cleanup SIGINT SIGTERM
 
 detect_and_activate_python() {
     echo -e "${BLUE}🐍 Detecting Python environment...${NC}"
+    
+    # Skip if disabled
+    if [ "$SKIP_ENVIRONMENT_DETECTION" = "true" ]; then
+        echo -e "${YELLOW}💡 Environment detection skipped by configuration${NC}"
+        PYTHON_VERSION=$(python --version 2>&1 || python3 --version 2>&1 || echo "Unknown")
+        return 0
+    fi
     
     # Check if conda is available
     if command -v conda >/dev/null 2>&1; then
@@ -89,6 +116,7 @@ detect_and_activate_python() {
             source "$PROJECT_ROOT/venv/bin/activate"
             if [ "$VIRTUAL_ENV" ]; then
                 echo -e "${GREEN}✅ Virtual environment activated${NC}"
+                USING_VENV=true
             fi
         fi
     fi
@@ -97,6 +125,198 @@ detect_and_activate_python() {
     PYTHON_VERSION=$(python --version 2>&1 || echo "Python not found")
     echo -e "${BLUE}   Python: $PYTHON_VERSION${NC}"
 }
+
+# =============================================================================
+# SQLITE ENVIRONMENT DETECTION AND VALIDATION
+# =============================================================================
+
+load_sqlite_environment_safely() {
+    echo -e "${BLUE}🔍 Loading SQLite environment configuration...${NC}"
+    
+    # Skip if force system SQLite
+    if [ "$FORCE_SYSTEM_SQLITE" = "true" ]; then
+        echo -e "${YELLOW}💡 Using system SQLite (forced by configuration)${NC}"
+        CUSTOM_SQLITE_LOADED=false
+        return 0
+    fi
+    
+    # Check if custom SQLite environment file exists
+    if [ -f "$SQLITE_ENV_FILE" ]; then
+        echo -e "${BLUE}🔧 Loading custom SQLite environment...${NC}"
+        
+        # Validate environment file before loading
+        if validate_sqlite_env_file "$SQLITE_ENV_FILE"; then
+            # Load the environment
+            source "$SQLITE_ENV_FILE"
+            CUSTOM_SQLITE_LOADED=true
+            
+            echo -e "${GREEN}✅ Custom SQLite environment loaded${NC}"
+            
+            # Post-load validation if enabled
+            if [ "$ENABLE_SQLITE_VALIDATION" = "true" ]; then
+                validate_sqlite_environment
+            else
+                SQLITE_STATUS="loaded_not_validated"
+            fi
+        else
+            echo -e "${YELLOW}⚠️ SQLite environment file invalid, using system defaults${NC}"
+            CUSTOM_SQLITE_LOADED=false
+            SQLITE_STATUS="invalid_env_file"
+        fi
+    else
+        echo -e "${BLUE}💡 No custom SQLite environment found, using system SQLite${NC}"
+        CUSTOM_SQLITE_LOADED=false
+        SQLITE_STATUS="system_default"
+    fi
+    
+    # Display current SQLite status
+    display_sqlite_status
+}
+
+validate_sqlite_env_file() {
+    local env_file="$1"
+    
+    # Basic file checks
+    if [ ! -f "$env_file" ] || [ ! -r "$env_file" ]; then
+        return 1
+    fi
+    
+    # Check for required variables
+    if ! grep -q "LD_LIBRARY_PATH" "$env_file" || ! grep -q "CUSTOM_SQLITE_COMPILED" "$env_file"; then
+        return 1
+    fi
+    
+    return 0
+}
+
+validate_sqlite_environment() {
+    echo -e "${BLUE}🧪 Validating SQLite environment...${NC}"
+    
+    # Run validation with timeout to prevent hanging
+    local validation_result
+    validation_result=$(timeout "$CUSTOM_SQLITE_VALIDATION_TIMEOUT" python -c "
+import sys
+import signal
+
+def timeout_handler(signum, frame):
+    print('validation_timeout')
+    sys.exit(1)
+
+signal.signal(signal.SIGALRM, timeout_handler)
+signal.alarm($CUSTOM_SQLITE_VALIDATION_TIMEOUT)
+
+try:
+    import sqlite3
+    version = sqlite3.sqlite_version
+    print(f'sqlite_version:{version}')
+    
+    # Parse version for compatibility check
+    version_parts = version.split('.')
+    major, minor = int(version_parts[0]), int(version_parts[1])
+    
+    if major >= 3 and minor >= 35:
+        print('sqlite_compatible:true')
+    else:
+        print('sqlite_compatible:false')
+    
+    # Test ChromaDB basic import
+    try:
+        import chromadb
+        client = chromadb.Client()
+        print('chromadb_status:ok')
+    except ImportError:
+        print('chromadb_status:not_installed')
+    except Exception as e:
+        if 'sqlite' in str(e).lower():
+            print('chromadb_status:sqlite_error')
+        else:
+            print('chromadb_status:other_error')
+    
+    print('validation_status:success')
+    
+except ImportError as e:
+    print(f'validation_status:import_error:{e}')
+except Exception as e:
+    print(f'validation_status:error:{e}')
+finally:
+    signal.alarm(0)  # Cancel the alarm
+" 2>/dev/null || echo "validation_status:failed")
+    
+    # Parse validation results
+    local sqlite_version="unknown"
+    local sqlite_compatible="false"
+    local chromadb_status="unknown"
+    local validation_status="unknown"
+    
+    while IFS= read -r line; do
+        case "$line" in
+            sqlite_version:*) sqlite_version="${line#sqlite_version:}" ;;
+            sqlite_compatible:*) sqlite_compatible="${line#sqlite_compatible:}" ;;
+            chromadb_status:*) chromadb_status="${line#chromadb_status:}" ;;
+            validation_status:*) validation_status="${line#validation_status:}" ;;
+        esac
+    done <<< "$validation_result"
+    
+    # Update global status variables
+    SQLITE_STATUS="$validation_status"
+    CHROMADB_STATUS="$chromadb_status"
+    
+    # Display results
+    echo -e "${BLUE}   SQLite version: $sqlite_version${NC}"
+    
+    if [ "$sqlite_compatible" = "true" ]; then
+        echo -e "${GREEN}   ✅ SQLite version compatible with ChromaDB${NC}"
+    else
+        echo -e "${YELLOW}   ⚠️ SQLite version may not be compatible with ChromaDB${NC}"
+    fi
+    
+    case "$chromadb_status" in
+        "ok")
+            echo -e "${GREEN}   ✅ ChromaDB compatible and functional${NC}"
+            ;;
+        "sqlite_error")
+            echo -e "${RED}   ❌ ChromaDB has SQLite compatibility issues${NC}"
+            ;;
+        "not_installed")
+            echo -e "${YELLOW}   ⚠️ ChromaDB not yet installed${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}   ⚠️ ChromaDB status unclear: $chromadb_status${NC}"
+            ;;
+    esac
+    
+    # Handle validation failures based on strategy
+    if [ "$validation_status" != "success" ]; then
+        case "$SQLITE_FALLBACK_STRATEGY" in
+            "strict")
+                echo -e "${RED}❌ SQLite validation failed in strict mode${NC}"
+                return 1
+                ;;
+            "graceful")
+                echo -e "${YELLOW}⚠️ SQLite validation failed, continuing with degraded functionality${NC}"
+                CUSTOM_SQLITE_LOADED=false
+                return 0
+                ;;
+            "disabled")
+                echo -e "${BLUE}💡 SQLite validation disabled, continuing${NC}"
+                return 0
+                ;;
+        esac
+    fi
+    
+    return 0
+}
+
+display_sqlite_status() {
+    echo -e "${BLUE}📊 SQLite Environment Status:${NC}"
+    echo -e "${BLUE}   Custom SQLite loaded: $([ "$CUSTOM_SQLITE_LOADED" = "true" ] && echo "✅ Yes" || echo "❌ No")${NC}"
+    echo -e "${BLUE}   SQLite status: $SQLITE_STATUS${NC}"
+    echo -e "${BLUE}   ChromaDB status: $CHROMADB_STATUS${NC}"
+}
+
+# =============================================================================
+# PYTHONPATH CONFIGURATION
+# =============================================================================
 
 configure_pythonpath() {
     echo -e "${BLUE}📁 Configuring Python path for local source code...${NC}"
@@ -139,6 +359,10 @@ except Exception as e:
         exit 1
     fi
 }
+
+# =============================================================================
+# DEPENDENCY VERIFICATION
+# =============================================================================
 
 check_dependencies() {
     echo -e "${BLUE}🔍 Checking essential dependencies...${NC}"
@@ -205,125 +429,248 @@ print('✅ Core dependencies check completed')
 # PRE-FLIGHT CHECKS
 # =============================================================================
 
-echo -e "${BLUE}🔍 Pre-flight checks...${NC}"
-
-# Check if we're in the right directory
-if [ ! -f "$BACKEND_PATH/open_webui/main.py" ]; then
-    echo -e "${RED}❌ Backend source not found. Please run from project root directory.${NC}"
-    echo -e "${YELLOW}   Expected: $BACKEND_PATH/open_webui/main.py${NC}"
-    exit 1
-fi
-
-# Check for existing instances
-if [ -f "$PID_FILE" ]; then
-    PID=$(cat "$PID_FILE")
-    if kill -0 $PID 2>/dev/null; then
-        echo -e "${RED}❌ API-Doc-IA already running (PID: $PID)${NC}"
-        exit 1
-    else
-        rm -f "$PID_FILE"
-    fi
-fi
-
-# Check port 8080
-if lsof -t -i:8080 2>/dev/null >/dev/null; then
-    echo -e "${RED}❌ Port 8080 is already in use${NC}"
-    echo -e "${YELLOW}💡 Stop other services or change port in configuration${NC}"
-    exit 1
-fi
-
-# =============================================================================
-# ENVIRONMENT SETUP
-# =============================================================================
-
-detect_and_activate_python
-configure_pythonpath
-check_dependencies
-
-# Load environment variables
-if [ -f "$PROJECT_ROOT/.env" ]; then
-    echo -e "${BLUE}📄 Loading .env configuration...${NC}"
-    set -a
-    source "$PROJECT_ROOT/.env"
-    set +a
-else
-    echo -e "${YELLOW}💡 No .env file found, using defaults${NC}"
-fi
-
-# Set default environment variables
-export WEBUI_AUTH=${WEBUI_AUTH:-true}
-export API_V2_ENABLED=${API_V2_ENABLED:-true}
-export HOST=${HOST:-0.0.0.0}
-export PORT=${PORT:-8080}
-export LOG_LEVEL="info"  # Force lowercase for uvicorn compatibility
-
-# =============================================================================
-# STARTUP INFORMATION
-# =============================================================================
-
-echo -e "${GREEN}📊 STARTUP INFORMATION:${NC}"
-echo -e "${GREEN}   🏠 Project: $PROJECT_ROOT${NC}"
-echo -e "${GREEN}   🐍 Backend: $BACKEND_PATH${NC}"
-echo -e "${GREEN}   📋 Logs: $LOG_FILE${NC}"
-echo -e "${GREEN}   🌐 URL: http://localhost:${PORT}${NC}"
-echo -e "${GREEN}   🔌 API v2: http://localhost:${PORT}/api/v2/health${NC}"
-echo -e "${GREEN}   📖 Docs: http://localhost:${PORT}/docs${NC}"
-
-if [ "$USING_CONDA_ENV" = "true" ]; then
-    echo -e "${GREEN}   🐍 Environment: conda (test-api-doc-ia)${NC}"
-else
-    echo -e "${YELLOW}   🐍 Environment: system Python${NC}"
-fi
-
-# Create log file
-echo "============================================" > "$LOG_FILE"
-echo "API-DOC-IA STARTUP - $(date)" >> "$LOG_FILE"
-echo "PROJECT_ROOT: $PROJECT_ROOT" >> "$LOG_FILE"
-echo "BACKEND_PATH: $BACKEND_PATH" >> "$LOG_FILE"
-echo "PYTHONPATH: $PYTHONPATH" >> "$LOG_FILE"
-echo "CONDA_DEFAULT_ENV: $CONDA_DEFAULT_ENV" >> "$LOG_FILE"
-echo "============================================" >> "$LOG_FILE"
-
-# =============================================================================
-# SERVER STARTUP
-# =============================================================================
-
-echo -e "${BLUE}🚀 Starting server...${NC}"
-echo -e "${YELLOW}💡 Press Ctrl+C to stop${NC}"
-
-# Change to project root for database paths
-cd "$PROJECT_ROOT"
-
-# Start server using our local backend code
-python -m uvicorn open_webui.main:app \
-    --host "$HOST" \
-    --port "$PORT" \
-    --reload \
-    --reload-dir "$BACKEND_PATH/open_webui" \
-    --log-level "$LOG_LEVEL" 2>&1 | tee -a "$LOG_FILE" &
-
-SERVER_PID=$!
-echo $SERVER_PID > "$PID_FILE"
-
-echo -e "${GREEN}✅ Server started (PID: $SERVER_PID)${NC}"
-
-# Wait for startup and test
-sleep 5
-if curl -s "http://localhost:${PORT}" > /dev/null 2>&1; then
-    echo -e "${GREEN}✅ Server is responding${NC}"
+perform_preflight_checks() {
+    echo -e "${BLUE}🔍 Pre-flight checks...${NC}"
     
-    # Test API v2 if available
-    if curl -s "http://localhost:${PORT}/api/v2/health" > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ API v2 is responding${NC}"
-    else
-        echo -e "${YELLOW}⚠️ API v2 not available yet (may need configuration)${NC}"
+    # Check if we're in the right directory
+    if [ ! -f "$BACKEND_PATH/open_webui/main.py" ]; then
+        echo -e "${RED}❌ Backend source not found. Please run from project root directory.${NC}"
+        echo -e "${YELLOW}   Expected: $BACKEND_PATH/open_webui/main.py${NC}"
+        return 1
     fi
-else
-    echo -e "${YELLOW}⚠️ Server not ready yet (normal during startup)${NC}"
-fi
+    
+    # Check for existing instances
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
+        if kill -0 $PID 2>/dev/null; then
+            echo -e "${RED}❌ API-Doc-IA already running (PID: $PID)${NC}"
+            return 1
+        else
+            rm -f "$PID_FILE"
+        fi
+    fi
+    
+    # Check port 8080
+    if lsof -t -i:8080 2>/dev/null >/dev/null; then
+        echo -e "${RED}❌ Port 8080 is already in use${NC}"
+        echo -e "${YELLOW}💡 Stop other services or change port in configuration${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}✅ Pre-flight checks passed${NC}"
+    return 0
+}
 
-echo -e "${GREEN}🎉 API-DOC-IA is starting up!${NC}"
-echo -e "${BLUE}📋 Access the web interface at: http://localhost:${PORT}${NC}"
+# =============================================================================
+# SERVER ENVIRONMENT PREPARATION
+# =============================================================================
 
-# Wait for process
-wait $SERVER_PID
+prepare_server_environment() {
+    echo -e "${BLUE}🔧 Preparing server environment...${NC}"
+    
+    # Ensure custom SQLite is available for the server process
+    if [ "$CUSTOM_SQLITE_LOADED" = "true" ]; then
+        echo -e "${BLUE}   Activating custom SQLite for server process...${NC}"
+        
+        # Re-validate environment one more time if validation is enabled
+        if [ "$ENABLE_SQLITE_VALIDATION" = "true" ]; then
+            if ! validate_sqlite_environment >/dev/null 2>&1; then
+                echo -e "${YELLOW}   ⚠️ SQLite validation failed, falling back to system${NC}"
+                
+                # Reset environment variables to use system SQLite
+                unset LD_LIBRARY_PATH LD_PRELOAD
+                CUSTOM_SQLITE_LOADED=false
+                SQLITE_STATUS="fallback_to_system"
+            fi
+        fi
+    fi
+    
+    # Load environment variables from .env file
+    if [ -f "$PROJECT_ROOT/.env" ]; then
+        echo -e "${BLUE}📄 Loading .env configuration...${NC}"
+        set -a
+        source "$PROJECT_ROOT/.env"
+        set +a
+    else
+        echo -e "${YELLOW}💡 No .env file found, using defaults${NC}"
+    fi
+    
+    # Set server environment variables with fallbacks
+    export HOST="${HOST:-0.0.0.0}"
+    export PORT="${PORT:-8080}"
+    export WEBUI_AUTH="${WEBUI_AUTH:-true}"
+    export API_V2_ENABLED="${API_V2_ENABLED:-true}"
+    export LOG_LEVEL="info"  # Force lowercase for uvicorn compatibility
+    
+    # Add SQLite environment status to server environment
+    if [ "$CUSTOM_SQLITE_LOADED" = "true" ]; then
+        export SQLITE_ENV_STATUS="custom"
+        export CUSTOM_SQLITE_ACTIVE="true"
+    else
+        export SQLITE_ENV_STATUS="system"
+        export CUSTOM_SQLITE_ACTIVE="false"
+    fi
+    
+    echo -e "${GREEN}✅ Server environment prepared${NC}"
+}
+
+# =============================================================================
+# SERVER STARTUP AND MONITORING
+# =============================================================================
+
+start_server_with_monitoring() {
+    echo -e "${BLUE}🚀 Starting server with monitoring...${NC}"
+    echo -e "${YELLOW}💡 Press Ctrl+C to stop${NC}"
+    
+    # Create log file with startup information
+    echo "============================================" > "$LOG_FILE"
+    echo "API-DOC-IA STARTUP - $(date)" >> "$LOG_FILE"
+    echo "PROJECT_ROOT: $PROJECT_ROOT" >> "$LOG_FILE"
+    echo "BACKEND_PATH: $BACKEND_PATH" >> "$LOG_FILE"
+    echo "PYTHONPATH: $PYTHONPATH" >> "$LOG_FILE"
+    echo "CONDA_DEFAULT_ENV: ${CONDA_DEFAULT_ENV:-not_set}" >> "$LOG_FILE"
+    echo "CUSTOM_SQLITE_LOADED: $CUSTOM_SQLITE_LOADED" >> "$LOG_FILE"
+    echo "SQLITE_STATUS: $SQLITE_STATUS" >> "$LOG_FILE"
+    echo "CHROMADB_STATUS: $CHROMADB_STATUS" >> "$LOG_FILE"
+    echo "============================================" >> "$LOG_FILE"
+    
+    # Change to project root for database paths
+    cd "$PROJECT_ROOT"
+    
+    # Start server using our local backend code
+    if ! python -m uvicorn open_webui.main:app \
+        --host "$HOST" \
+        --port "$PORT" \
+        --reload \
+        --reload-dir "$BACKEND_PATH/open_webui" \
+        --log-level "$LOG_LEVEL" 2>&1 | tee -a "$LOG_FILE" &
+    then
+        echo -e "${RED}❌ Failed to start server${NC}"
+        return 1
+    fi
+    
+    SERVER_PID=$!
+    echo $SERVER_PID > "$PID_FILE"
+    
+    echo -e "${GREEN}✅ Server started (PID: $SERVER_PID)${NC}"
+    
+    # Wait and validate startup
+    validate_server_startup
+}
+
+validate_server_startup() {
+    echo -e "${BLUE}🧪 Validating server startup...${NC}"
+    
+    # Wait for startup
+    sleep 5
+    
+    # Test basic connectivity
+    if curl -s "http://localhost:${PORT}" > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ Server is responding${NC}"
+        
+        # Test API v2 if available
+        if curl -s "http://localhost:${PORT}/api/v2/health" > /dev/null 2>&1; then
+            echo -e "${GREEN}✅ API v2 is responding${NC}"
+        else
+            echo -e "${YELLOW}⚠️ API v2 not available yet (may need configuration)${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️ Server not ready yet (normal during startup)${NC}"
+    fi
+}
+
+# =============================================================================
+# STARTUP INFORMATION DISPLAY
+# =============================================================================
+
+display_startup_information() {
+    echo -e "${GREEN}📊 STARTUP INFORMATION:${NC}"
+    echo -e "${GREEN}   🏠 Project: $PROJECT_ROOT${NC}"
+    echo -e "${GREEN}   🐍 Backend: $BACKEND_PATH${NC}"
+    echo -e "${GREEN}   📋 Logs: $LOG_FILE${NC}"
+    echo -e "${GREEN}   🌐 URL: http://localhost:${PORT}${NC}"
+    echo -e "${GREEN}   🔌 API v2: http://localhost:${PORT}/api/v2/health${NC}"
+    echo -e "${GREEN}   📖 Docs: http://localhost:${PORT}/docs${NC}"
+    
+    # Environment information
+    if [ "$USING_CONDA_ENV" = "true" ]; then
+        echo -e "${GREEN}   🐍 Environment: conda (test-api-doc-ia)${NC}"
+    elif [ "$USING_VENV" = "true" ]; then
+        echo -e "${GREEN}   🐍 Environment: virtual environment${NC}"
+    else
+        echo -e "${YELLOW}   🐍 Environment: system Python${NC}"
+    fi
+    
+    # SQLite information
+    if [ "$CUSTOM_SQLITE_LOADED" = "true" ]; then
+        echo -e "${GREEN}   💾 SQLite: Custom compiled (ChromaDB optimized) ✅${NC}"
+    else
+        echo -e "${YELLOW}   💾 SQLite: System default${NC}"
+        if [ "$SQLITE_STATUS" = "fallback_to_system" ]; then
+            echo -e "${YELLOW}       (Fallback: custom SQLite validation failed)${NC}"
+        fi
+    fi
+    
+    # ChromaDB status
+    case "$CHROMADB_STATUS" in
+        "ok")
+            echo -e "${GREEN}   🔍 ChromaDB: Fully functional ✅${NC}"
+            ;;
+        "sqlite_error")
+            echo -e "${RED}   🔍 ChromaDB: SQLite compatibility issues ⚠️${NC}"
+            ;;
+        "not_installed")
+            echo -e "${YELLOW}   🔍 ChromaDB: Not yet installed ⚠️${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}   🔍 ChromaDB: Status unclear (${CHROMADB_STATUS}) ⚠️${NC}"
+            ;;
+    esac
+    
+    echo ""
+    echo -e "${GREEN}🎉 API-DOC-IA is starting up!${NC}"
+    echo -e "${BLUE}📋 Access the web interface at: http://localhost:${PORT}${NC}"
+    echo ""
+}
+
+# =============================================================================
+# MAIN STARTUP FLOW
+# =============================================================================
+
+main() {
+    # Pre-flight checks
+    if ! perform_preflight_checks; then
+        exit 1
+    fi
+    
+    # Environment detection and activation
+    detect_and_activate_python
+    
+    # Python path configuration
+    configure_pythonpath
+    
+    # SQLite environment loading and validation
+    load_sqlite_environment_safely
+    
+    # Dependency checks
+    check_dependencies
+    
+    # Server environment preparation
+    prepare_server_environment
+    
+    # Display startup information
+    display_startup_information
+    
+    # Start server with monitoring
+    start_server_with_monitoring
+    
+    # Wait for process
+    wait $SERVER_PID
+}
+
+# =============================================================================
+# EXECUTION
+# =============================================================================
+
+# Run main startup sequence
+main "$@"

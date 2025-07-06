@@ -927,11 +927,11 @@ def _calculate_api_v2_max_concurrent():
         memory_per_file = 520  # MB per file processing (corrected from analysis)
         available_ram = ram_gb * 1024 * 0.7  # 70% RAM available for processing
         max_concurrent = max(1, int(available_ram / memory_per_file))
-        # Apply safety limits
+        # Apply safety limits (EPYC 64-core optimized)
         if ram_gb >= 512:
-            return min(max_concurrent, 30)
+            return min(max_concurrent, 64)  # EPYC 64-core support
         elif ram_gb >= 32:
-            return min(max_concurrent, 6)
+            return min(max_concurrent, 16)
         elif ram_gb >= 16:
             return min(max_concurrent, 3)
         else:
@@ -961,7 +961,7 @@ API_V2_MAX_CONCURRENT = PersistentConfig(
 API_V2_TIMEOUT = PersistentConfig(
     "API_V2_TIMEOUT",
     "api_v2.timeout",
-    int(os.environ.get("API_V2_TIMEOUT", "300")),  # 5 minutes default
+    int(os.environ.get("API_V2_TIMEOUT", "600")),  # 10 minutes default
 )
 
 API_V2_ADMIN_MODEL = PersistentConfig(

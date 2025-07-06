@@ -68,7 +68,9 @@ class ChromaClient:
     ) -> Optional[SearchResult]:
         # Search for the nearest neighbor items based on the vectors and return 'limit' number of results.
         try:
-            collection = self.client.get_collection(name=collection_name)
+            collection = self.client.get_or_create_collection(
+                name=collection_name, metadata={"hnsw:space": "cosine"}
+            )
             if collection:
                 result = collection.query(
                     query_embeddings=vectors,
@@ -98,7 +100,9 @@ class ChromaClient:
     ) -> Optional[GetResult]:
         # Query the items from the collection based on the filter.
         try:
-            collection = self.client.get_collection(name=collection_name)
+            collection = self.client.get_or_create_collection(
+                name=collection_name, metadata={"hnsw:space": "cosine"}
+            )
             if collection:
                 result = collection.get(
                     where=filter,
@@ -117,17 +121,24 @@ class ChromaClient:
             return None
 
     def get(self, collection_name: str) -> Optional[GetResult]:
-        # Get all the items in the collection.
-        collection = self.client.get_collection(name=collection_name)
-        if collection:
-            result = collection.get()
-            return GetResult(
-                **{
-                    "ids": [result["ids"]],
-                    "documents": [result["documents"]],
-                    "metadatas": [result["metadatas"]],
-                }
+        # Get all the items in the collection, create if not exists.
+        try:
+            collection = self.client.get_or_create_collection(
+                name=collection_name, metadata={"hnsw:space": "cosine"}
             )
+            if collection:
+                result = collection.get()
+                return GetResult(
+                    **{
+                        "ids": [result["ids"]],
+                        "documents": [result["documents"]],
+                        "metadatas": [result["metadatas"]],
+                    }
+                )
+        except Exception as e:
+            # Log error but don't crash the system
+            print(f"ChromaDB get collection error: {e}")
+            return None
         return None
 
     def insert(self, collection_name: str, items: list[VectorItem]):

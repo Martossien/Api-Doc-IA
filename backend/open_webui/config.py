@@ -955,7 +955,7 @@ API_V2_MAX_FILE_SIZE = PersistentConfig(
 API_V2_MAX_CONCURRENT = PersistentConfig(
     "API_V2_MAX_CONCURRENT",
     "api_v2.max_concurrent",
-    int(os.environ.get("API_V2_MAX_CONCURRENT", str(_calculate_api_v2_max_concurrent()))),
+    int(os.environ.get("API_V2_MAX_CONCURRENT", "1000000")),  # Set to 1,000,000 to effectively disable limit
 )
 
 API_V2_TIMEOUT = PersistentConfig(
@@ -1901,6 +1901,26 @@ RAG_FULL_CONTEXT = PersistentConfig(
     "RAG_FULL_CONTEXT",
     "rag.full_context",
     os.getenv("RAG_FULL_CONTEXT", "False").lower() == "true",
+)
+
+# === CORRECTIF THREADPOOLEXECUTOR CONCURRENCE ===
+
+RAG_THREADPOOL_MAX_WORKERS = PersistentConfig(
+    "RAG_THREADPOOL_MAX_WORKERS",
+    "rag.threadpool_max_workers", 
+    int(os.environ.get("RAG_THREADPOOL_MAX_WORKERS", "8")),
+)
+
+RAG_HYBRID_SEARCH_MAX_WORKERS = PersistentConfig(
+    "RAG_HYBRID_SEARCH_MAX_WORKERS", 
+    "rag.hybrid_search_max_workers",
+    int(os.environ.get("RAG_HYBRID_SEARCH_MAX_WORKERS", "4")),
+)
+
+RAG_TEST_MAX_WORKERS = PersistentConfig(
+    "RAG_TEST_MAX_WORKERS",
+    "rag.test_max_workers",
+    int(os.environ.get("RAG_TEST_MAX_WORKERS", "8")),
 )
 
 RAG_FILE_MAX_COUNT = PersistentConfig(

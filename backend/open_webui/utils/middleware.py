@@ -17,6 +17,8 @@ import ast
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 
+from open_webui.config import RAG_THREADPOOL_MAX_WORKERS
+
 
 from fastapi import Request, HTTPException
 from starlette.responses import Response, StreamingResponse
@@ -613,7 +615,8 @@ async def chat_completion_files_handler(
         try:
             # Offload get_sources_from_files to a separate thread
             loop = asyncio.get_running_loop()
-            with ThreadPoolExecutor() as executor:
+            with ThreadPoolExecutor(max_workers=RAG_THREADPOOL_MAX_WORKERS.value) as executor:
+                log.info(f"🔧 RAG ThreadPool started with max_workers={RAG_THREADPOOL_MAX_WORKERS.value}")
                 sources = await loop.run_in_executor(
                     executor,
                     lambda: get_sources_from_files(

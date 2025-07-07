@@ -11,7 +11,7 @@ from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriev
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 
-from open_webui.config import VECTOR_DB
+from open_webui.config import VECTOR_DB, RAG_HYBRID_SEARCH_MAX_WORKERS
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 
 from open_webui.models.users import UserModel
@@ -337,7 +337,8 @@ def query_collection_with_hybrid_search(
         for q in queries
     ]
 
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=RAG_HYBRID_SEARCH_MAX_WORKERS.value) as executor:
+        logging.info(f"🔧 Hybrid Search ThreadPool started with max_workers={RAG_HYBRID_SEARCH_MAX_WORKERS.value}")
         future_results = [executor.submit(process_query, cn, q) for cn, q in tasks]
         task_results = [future.result() for future in future_results]
 

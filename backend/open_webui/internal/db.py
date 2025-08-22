@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import sys
 from contextlib import contextmanager
 from typing import Any, Optional
 
@@ -51,6 +53,11 @@ class JSONField(types.TypeDecorator):
 # Workaround to handle the peewee migration
 # This is required to ensure the peewee migration is handled before the alembic migration
 def handle_peewee_migration(DATABASE_URL):
+    # Skip Peewee migration if running Alembic commands
+    if "alembic" in sys.argv[0]:
+        log.info("Skipping Peewee migration for Alembic command")
+        return
+
     # db = None
     try:
         # Replace the postgresql:// with postgres:// to handle the peewee migration

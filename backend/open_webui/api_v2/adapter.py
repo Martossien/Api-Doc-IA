@@ -227,14 +227,55 @@ class OpenWebUIAdapter:
                     ]
                 }
             }
-            
+
             log.info(f"✅ STEP 1: Prepared form_data for API v1 workflow")
             log.info(f"   - Model: {selected_model}")
             log.info(f"   - File ID: {file_info.file_id}")
             log.info(f"   - Temperature: {form_data['temperature']}")
-            
+
             # Update progress
-            self.update_task_status(task_id, progress="30.0")
+            self.update_task_status(task_id, progress="20.0")
+
+            # ✅ STEP 2.5: Ensure content extraction before RAG and inject full context inline
+            MAX_INLINE_CONTEXT_CHARS =  int(processing_config.get("max_inline_context_chars", 0)) if isinstance(processing_config, dict) else 0
+            try:
+                log.info("🧩 STEP 1.5: Running process_file() to extract content")
+                from open_webui.routers.retrieval import ProcessFileForm, process_file as owui_process_file
+                # Offload potentially heavy extraction to thread pool
+                await asyncio.to_thread(owui_process_file, request, ProcessFileForm(file_id=file_info.file_id), user)
+                self.update_task_status(task_id, progress="30.0")
+
+                # Retrieve extracted content from DB
+                file_obj = Files.get_file_by_id(file_info.file_id)
+                extracted_text = ""
+                if file_obj and file_obj.data:
+                    extracted_text = file_obj.data.get("content", "") or ""
+
+                if extracted_text:
+                    # Truncate only if positive limit; <=0 means unlimited
+                    if MAX_INLINE_CONTEXT_CHARS and MAX_INLINE_CONTEXT_CHARS > 0:
+                        inline_text = extracted_text[:MAX_INLINE_CONTEXT_CHARS]
+                    else:
+                        inline_text = extracted_text
+                    log.info(f"📎 Injecting full context inline ({len(inline_text)} chars)")
+                    # Force full-context mode for this file
+                    form_files = form_data.get("metadata", {}).get("files", [])
+                    if form_files:
+                        form_files[0]["context"] = "full"
+                        form_files[0]["file"] = {
+                            "data": {
+                                "content": inline_text
+                            },
+                            "metadata": {
+                                "source": file_info.filename
+                            }
+                        }
+                else:
+                    log.warning("⚠️ No extracted content found after process_file; continuing without inline context")
+            except Exception as pf_err:
+                log.warning(f"⚠️ process_file() or inline injection failed: {pf_err}")
+                # Proceed without blocking; RAG may still fallback to vector store if available
+                self.update_task_status(task_id, progress="30.0")
             
             # ✅ STEP 3: Call proven API v1 chat_completion_files_handler()
             from open_webui.utils.middleware import chat_completion_files_handler
@@ -250,11 +291,35 @@ class OpenWebUIAdapter:
                 )
                 
                 log.info(f"✅ STEP 2 SUCCESS: chat_completion_files_handler() completed")
-                log.info(f"   - Sources found: {len(flags.get('sources', []))}")
-                if flags.get('sources'):
-                    log.info(f"   - Content extracted: YES (sources available)")
-                else:
-                    log.info(f"   - Content extracted: Checking enhanced form_data...")
+                sources = flags.get('sources', []) or []
+                log.info(f"   - Sources found: {len(sources)}")
+                # Inject RAG context into the last user message (preserve client JSON instructions)
+                if sources:
+                    MAX_SOURCE_CHARS = 20000
+                    context_parts = []
+                    for s in sources:
+                        file_meta = s.get("source", {})
+                        fid = file_meta.get("id") or file_info.file_id
+                        doc_list = s.get("document") or []
+                        doc_text = "".join(x for x in doc_list if isinstance(x, str))
+                        if len(doc_text) > MAX_SOURCE_CHARS:
+                            doc_text = doc_text[:MAX_SOURCE_CHARS]
+                        context_parts.append(f"<source id=\"{fid}\">{doc_text}</source>")
+                    context_string = "\n".join(context_parts)
+                    msgs = enhanced_form_data.get("messages", [])
+                    # Find last user message
+                    user_idx = None
+                    for i in range(len(msgs)-1, -1, -1):
+                        if msgs[i].get("role") == "user":
+                            user_idx = i
+                            break
+                    if user_idx is None and msgs:
+                        user_idx = len(msgs) - 1
+                    if user_idx is not None:
+                        original = msgs[user_idx].get("content", "")
+                        # Prepend explicit context block, keep client's prompt intact
+                        msgs[user_idx]["content"] = f"[Contexte fourni]\n{context_string}\n\n{original}"
+                        enhanced_form_data["messages"] = msgs
                 
                 # Update progress
                 self.update_task_status(task_id, progress="60.0")

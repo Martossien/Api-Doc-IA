@@ -823,7 +823,9 @@ def save_docs_to_vector_db(
     )
 
     # Check if entries with the same hash (metadata.hash) already exist
-    if metadata and "hash" in metadata:
+    # ONLY if collection already exists to avoid triggering retry mechanism on new collections
+    if metadata and "hash" in metadata and VECTOR_DB_CLIENT.has_collection(collection_name):
+        log.debug(f"Vérification de doublon pour hash {metadata['hash']} dans collection existante {collection_name}")
         result = VECTOR_DB_CLIENT.query(
             collection_name=collection_name,
             filter={"hash": metadata["hash"]},

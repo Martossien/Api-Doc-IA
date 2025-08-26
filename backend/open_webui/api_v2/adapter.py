@@ -33,6 +33,9 @@ from open_webui.routers.retrieval import process_file, ProcessFileForm
 from open_webui.retrieval.utils import get_sources_from_files
 from open_webui.utils.task import rag_template
 
+# Import VECTOR_DB_CLIENT for collection validation
+from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
+
 # Import API v2 task management
 from open_webui.models.api_v2_tasks import ApiV2Tasks, ApiV2TaskModel
 
@@ -244,6 +247,29 @@ class OpenWebUIAdapter:
                 # Offload potentially heavy extraction to thread pool
                 await asyncio.to_thread(owui_process_file, request, ProcessFileForm(file_id=file_info.file_id), user)
                 self.update_task_status(task_id, progress="30.0")
+
+                # ✅ VALIDATION CRITIQUE: Vérifier que la collection ChromaDB est créée
+                collection_name = f"file-{file_info.file_id}"
+                log.info(f"🔍 VALIDATION CRITIQUE: Vérification collection {collection_name}")
+                
+                # Délai de synchronisation ChromaDB (race condition)
+                await asyncio.sleep(0.5)
+                
+                # Validation obligatoire de la collection
+                if not VECTOR_DB_CLIENT.has_collection(collection_name):
+                    log.error(f"❌ CRITICAL: Collection {collection_name} not created after processing")
+                    log.error(f"   - File: {file_info.filename}")
+                    log.error(f"   - Size: {file_info.size} bytes") 
+                    log.error(f"   - Type: {file_info.content_type}")
+                    log.error(f"   - Task: {task_id}")
+                    
+                    # Échec explicite au lieu d'échec silencieux
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Document vectorization failed - unable to create search index for {file_info.filename}. The file was uploaded but cannot be searched."
+                    )
+                
+                log.info(f"✅ VALIDATION SUCCÈS: Collection {collection_name} créée et validée")
 
                 # Retrieve extracted content from DB
                 file_obj = Files.get_file_by_id(file_info.file_id)

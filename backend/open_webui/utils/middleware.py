@@ -612,6 +612,7 @@ async def chat_completion_files_handler(
         if len(queries) == 0:
             queries = [get_last_user_message(body["messages"])]
 
+        extraction_success = True
         try:
             # Offload get_sources_from_files to a separate thread
             loop = asyncio.get_running_loop()
@@ -634,12 +635,43 @@ async def chat_completion_files_handler(
                         full_context=request.app.state.config.RAG_FULL_CONTEXT,
                     ),
                 )
+                
+            # 🔧 FIX HALLUCINATION: Verify content extraction success
+            # Check if sources contain actual document content with MINIMUM SIZE
+            has_content = False
+            if sources:
+                for src in sources:
+                    if isinstance(src, dict) and "document" in src:
+                        documents = src.get("document", [])
+                        if isinstance(documents, list):
+                            # Check if any document in the list has meaningful content
+                            for doc in documents:
+                                if isinstance(doc, str) and doc.strip():
+                                    # 🔧 MINIMUM CONTENT LENGTH: 10 chars for meaningful analysis  
+                                    if len(doc.strip()) >= 10:
+                                        has_content = True
+                                        break
+                                    else:
+                                        log.warning(f"⚠️ Content too short for analysis: {len(doc.strip())} chars (min: 10)")
+                        if has_content:
+                            break
+            
+            if not sources or not has_content:
+                file_names = [f.get('name', 'unknown') for f in files] if files else ['unknown']
+                log.warning(f"❌ Content extraction failed or empty for files: {file_names}")
+                log.warning(f"   Sources count: {len(sources)}, Content available: {has_content}")
+                extraction_success = False
+                
         except Exception as e:
             log.exception(e)
+            file_names = [f.get('name', 'unknown') for f in files] if files else ['unknown']
+            log.error(f"❌ RAG extraction exception for files: {file_names}")
+            extraction_success = False
 
         log.debug(f"rag_contexts:sources: {sources}")
+        log.info(f"🔍 Content extraction success: {extraction_success} ({len(sources)} sources)")
 
-    return body, {"sources": sources}
+    return body, {"sources": sources, "extraction_success": extraction_success, "files_processed": len(files) if files else 0}
 
 
 def apply_params_to_form_data(form_data, model):

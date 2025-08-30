@@ -270,7 +270,7 @@ class Loader:
             elif file_content_type in [
                 "application/vnd.ms-excel",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            ] or file_ext in ["xls", "xlsx"]:
+            ] or file_ext in ["xls", "xlsx", "xlsm"]:
                 loader = UnstructuredExcelLoader(file_path)
             elif file_content_type in [
                 "application/vnd.ms-powerpoint",

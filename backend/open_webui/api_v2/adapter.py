@@ -455,18 +455,80 @@ class OpenWebUIAdapter:
             log.info(f"🔄 PHASE 2: Starting API v1 wrapper for task {task_id}")
             log.info(f"📁 Processing file: {file_info.filename} (ID: {file_info.file_id})")
             
-            # ✅ STEP 1: Get model configuration
+            # ✅ STEP 1: Get model configuration with DB parameters
             from open_webui.config import API_V2_ADMIN_MODEL, API_V2_ADMIN_CONFIG
             
             # Determine model to use
             admin_model = API_V2_ADMIN_MODEL.value or "auto"
             selected_model = model or kwargs.get("model") or admin_model
             
-            # Get admin config for parameters
+            # Get admin config for fallback parameters
             admin_config = API_V2_ADMIN_CONFIG.value or {}
             processing_config = admin_config.get("processing", {}) if isinstance(admin_config, dict) else {}
+            llm_config = admin_config.get("llm", {}) if isinstance(admin_config, dict) else {}
+            
+            # 🔧 FIX REGRESSION: Get model parameters from DB instead of hardcoded config
+            # We'll retrieve the actual model after it's determined by the system
+            model_db_params = {}
+            def try_get_model_params(model_id):
+                """Try to get model parameters from DB"""
+                if not model_id or model_id == "auto":
+                    return {}
+                try:
+                    model_info = Models.get_model_by_id(model_id)
+                    if model_info and model_info.params:
+                        params = model_info.params if isinstance(model_info.params, dict) else model_info.params.model_dump()
+                        log.info(f"🔧 Retrieved DB parameters for model {model_id}: temperature={params.get('temperature')}, num_ctx={params.get('num_ctx')}")
+                        return params
+                    else:
+                        log.info(f"ℹ️ No DB parameters found for model {model_id}, using config defaults")
+                        return {}
+                except Exception as e:
+                    log.warning(f"⚠️ Failed to get DB parameters for model {model_id}: {e}")
+                    return {}
+            
+            # Try to get parameters for the selected model first
+            model_db_params = try_get_model_params(selected_model)
             
             # ✅ STEP 2: Prepare form_data in API v1 format for chat_completion_files_handler()
+            # 🔧 FIX REGRESSION: Use DB parameters with intelligent fallbacks
+            
+            # Priority order: 1) kwargs, 2) model DB params, 3) admin LLM config, 4) defaults
+            temperature = kwargs.get("temperature") or model_db_params.get("temperature") or llm_config.get("temperature", 0.7)
+            max_tokens = kwargs.get("max_tokens") or model_db_params.get("max_tokens") or llm_config.get("max_tokens", 4000)
+            
+            # Handle num_ctx (Ollama context length) -> max_tokens mapping
+            num_ctx = model_db_params.get("num_ctx")
+            if num_ctx and num_ctx > max_tokens:
+                # If num_ctx is configured and higher, use it as max_tokens
+                max_tokens = min(num_ctx, 65535)  # Cap at 65535 for safety
+                log.info(f"🔧 Using num_ctx from DB as max_tokens: {max_tokens}")
+            
+            # 🔧 FIX: Extract all Ollama-specific parameters from DB
+            ollama_params = {}
+            if model_db_params:
+                # Core parameters
+                if "top_k" in model_db_params:
+                    ollama_params["top_k"] = model_db_params["top_k"]
+                if "top_p" in model_db_params:
+                    ollama_params["top_p"] = model_db_params["top_p"]
+                if "frequency_penalty" in model_db_params:
+                    ollama_params["frequency_penalty"] = model_db_params["frequency_penalty"]
+                
+                # Ollama performance parameters
+                if "num_ctx" in model_db_params:
+                    ollama_params["num_ctx"] = model_db_params["num_ctx"]
+                if "num_batch" in model_db_params:
+                    ollama_params["num_batch"] = model_db_params["num_batch"]
+                if "num_gpu" in model_db_params:
+                    ollama_params["num_gpu"] = model_db_params["num_gpu"]
+                if "num_thread" in model_db_params:
+                    ollama_params["num_thread"] = model_db_params["num_thread"]
+                if "use_mmap" in model_db_params:
+                    ollama_params["use_mmap"] = model_db_params["use_mmap"]
+                
+                log.info(f"🔧 Ollama parameters from DB: {list(ollama_params.keys())}")
+            
             form_data = {
                 "model": selected_model,
                 "messages": [
@@ -476,8 +538,9 @@ class OpenWebUIAdapter:
                     }
                 ],
                 "stream": False,
-                "temperature": kwargs.get("temperature") or processing_config.get("temperature", 0.7),
-                "max_tokens": kwargs.get("max_tokens") or processing_config.get("max_tokens", 4000),
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                **ollama_params,  # Spread all Ollama parameters
                 "metadata": {
                     "files": [
                         {
@@ -492,7 +555,8 @@ class OpenWebUIAdapter:
             log.info(f"✅ STEP 1: Prepared form_data for API v1 workflow")
             log.info(f"   - Model: {selected_model}")
             log.info(f"   - File ID: {file_info.file_id}")
-            log.info(f"   - Temperature: {form_data['temperature']}")
+            log.info(f"   - Temperature: {temperature} (from DB: {model_db_params.get('temperature', 'N/A')})")
+            log.info(f"   - Max tokens: {max_tokens} (from DB num_ctx: {model_db_params.get('num_ctx', 'N/A')})")
 
             # Update progress
             self.update_task_status(task_id, progress="20.0")
@@ -593,7 +657,24 @@ class OpenWebUIAdapter:
                 
                 log.info(f"✅ STEP 2 SUCCESS: chat_completion_files_handler() completed")
                 sources = flags.get('sources', []) or []
+                
+                # 🔧 FIX HALLUCINATION: Check extraction success before proceeding
+                extraction_success = flags.get("extraction_success", True)
+                files_processed = flags.get("files_processed", 0)
+                
+                if not extraction_success and files_processed > 0:
+                    log.error(f"❌ Content extraction failed for {files_processed} file(s), stopping processing to prevent hallucination")
+                    log.error(f"   File: {file_info.filename} - Size: {file_info.size} bytes")
+                    log.error(f"   This prevents LLM from inventing content when no file context is available")
+                    
+                    raise Exception(
+                        f"Cannot analyze file '{file_info.filename}': content extraction failed. "
+                        f"This may be due to unsupported format, corrupted file, or processing errors. "
+                        f"Supported formats: PDF, DOCX, PPTX, TXT with proper content structure."
+                    )
+                
                 log.info(f"   - Sources found: {len(sources)}")
+                log.info(f"   - Extraction success: {extraction_success}")
                 # Inject RAG context into the last user message (preserve client JSON instructions)
                 if sources:
                     MAX_SOURCE_CHARS = 20000
@@ -649,10 +730,66 @@ class OpenWebUIAdapter:
                     selected_model = model_ids[0]
                     log.info(f"⚠️ Model fallback: using {selected_model}")
                     enhanced_form_data["model"] = selected_model
+                    
+                    # 🔧 FIX REGRESSION: Try to get DB params for the fallback model
+                    fallback_params = try_get_model_params(selected_model)
+                    if fallback_params:
+                        model_db_params = fallback_params
+                        log.info(f"🔧 Updated DB parameters for fallback model {selected_model}")
                 
             except Exception as models_error:
                 log.warning(f"⚠️ Could not get models list: {models_error}")
                 # Continue with selected model
+                
+            # 🔧 FIX REGRESSION: Final attempt to get model params from enhanced_form_data
+            final_model = enhanced_form_data.get("model", selected_model)
+            if final_model != selected_model and not model_db_params:
+                final_params = try_get_model_params(final_model)
+                if final_params:
+                    model_db_params = final_params
+                    log.info(f"🔧 Retrieved DB parameters for final model {final_model}")
+            
+            # Update the form data with the correct model parameters
+            if model_db_params:
+                # Re-calculate temperature and max_tokens with the final model params
+                temperature = kwargs.get("temperature") or model_db_params.get("temperature") or llm_config.get("temperature", 0.7)
+                max_tokens_base = kwargs.get("max_tokens") or model_db_params.get("max_tokens") or llm_config.get("max_tokens", 4000)
+                
+                # Handle num_ctx (Ollama context length) -> max_tokens mapping
+                num_ctx = model_db_params.get("num_ctx")
+                if num_ctx and num_ctx > max_tokens_base:
+                    max_tokens = min(num_ctx, 65535)  # Cap at 65535 for safety
+                    log.info(f"🔧 Using num_ctx from DB as max_tokens: {max_tokens} (was {max_tokens_base})")
+                else:
+                    max_tokens = max_tokens_base
+                
+                # Re-extract Ollama parameters for this updated model
+                updated_ollama_params = {}
+                if "top_k" in model_db_params:
+                    updated_ollama_params["top_k"] = model_db_params["top_k"]
+                if "top_p" in model_db_params:
+                    updated_ollama_params["top_p"] = model_db_params["top_p"]
+                if "frequency_penalty" in model_db_params:
+                    updated_ollama_params["frequency_penalty"] = model_db_params["frequency_penalty"]
+                if "num_ctx" in model_db_params:
+                    updated_ollama_params["num_ctx"] = model_db_params["num_ctx"]
+                if "num_batch" in model_db_params:
+                    updated_ollama_params["num_batch"] = model_db_params["num_batch"]
+                if "num_gpu" in model_db_params:
+                    updated_ollama_params["num_gpu"] = model_db_params["num_gpu"]
+                if "num_thread" in model_db_params:
+                    updated_ollama_params["num_thread"] = model_db_params["num_thread"]
+                if "use_mmap" in model_db_params:
+                    updated_ollama_params["use_mmap"] = model_db_params["use_mmap"]
+                
+                # Update enhanced form data with correct parameters
+                enhanced_form_data["temperature"] = temperature
+                enhanced_form_data["max_tokens"] = max_tokens
+                
+                # Add all Ollama parameters to enhanced_form_data
+                if updated_ollama_params:
+                    enhanced_form_data.update(updated_ollama_params)
+                    log.info(f"🔧 Applied {len(updated_ollama_params)} Ollama parameters to enhanced_form_data: {list(updated_ollama_params.keys())}")
             
             # ✅ STEP 5: Call generate_chat_completion() with enhanced data and safeguards
             from open_webui.utils.chat import generate_chat_completion
@@ -668,6 +805,7 @@ class OpenWebUIAdapter:
             
             log.info(f"   - Max tokens: {enhanced_form_data.get('max_tokens')}")
             log.info(f"   - Temperature: {enhanced_form_data.get('temperature', 0.7)}")
+            log.info(f"   - DB params applied: temp={model_db_params.get('temperature', 'N/A')}, ctx={model_db_params.get('num_ctx', 'N/A')}")
             
             try:
                 # This calls the proven LLM completion system with timeout
@@ -717,7 +855,8 @@ class OpenWebUIAdapter:
                 
                 # Enhanced response monitoring
                 log.info(f"📊 Response: {len(content)} characters")
-                log.info(f"🧠 LLM metrics: Model={selected_model}, JSON_valid={json_valid}, Temperature={form_data['temperature']}")
+                log.info(f"🧠 LLM metrics: Model={selected_model}, JSON_valid={json_valid}")
+                log.info(f"🧠 Parameters used: Temperature={temperature}, Max_tokens={max_tokens} (DB-driven)")
                 
                 if json_valid:
                     log.info(f"✅ PROCESSING SUCCESS: {file_info.filename} - JSON valid, ready for client")
@@ -741,8 +880,10 @@ class OpenWebUIAdapter:
                         "sources_count": len(flags.get("sources", [])),
                         "files_processed": 1,
                         "model_config": {
-                            "temperature": enhanced_form_data.get("temperature"),
-                            "max_tokens": enhanced_form_data.get("max_tokens")
+                            "temperature": temperature,
+                            "max_tokens": max_tokens,
+                            "db_params_used": model_db_params,
+                            "num_ctx_applied": model_db_params.get("num_ctx")
                         },
                         "api_v1_wrapper": True,
                         "chat_completion_files_handler": True

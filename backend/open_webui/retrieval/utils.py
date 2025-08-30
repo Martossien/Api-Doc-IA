@@ -78,6 +78,12 @@ def query_doc(
 ):
     try:
         log.debug(f"query_doc:doc {collection_name}")
+        
+        # Check if collection exists before querying
+        if not VECTOR_DB_CLIENT.has_collection(collection_name):
+            log.warning(f"Collection {collection_name} does not exist, skipping query")
+            return None
+        
         result = VECTOR_DB_CLIENT.search(
             collection_name=collection_name,
             vectors=[query_embedding],
@@ -96,6 +102,12 @@ def query_doc(
 def get_doc(collection_name: str, user: UserModel = None):
     try:
         log.debug(f"get_doc:doc {collection_name}")
+        
+        # Check if collection exists before getting
+        if not VECTOR_DB_CLIENT.has_collection(collection_name):
+            log.warning(f"Collection {collection_name} does not exist, skipping get")
+            return None
+        
         result = VECTOR_DB_CLIENT.get(collection_name=collection_name)
 
         if result:
@@ -300,6 +312,13 @@ def query_collection_with_hybrid_search(
             log.debug(
                 f"query_collection_with_hybrid_search:VECTOR_DB_CLIENT.get:collection {collection_name}"
             )
+            
+            # Check if collection exists before fetching
+            if not VECTOR_DB_CLIENT.has_collection(collection_name):
+                log.warning(f"Collection {collection_name} does not exist, skipping hybrid search")
+                collection_results[collection_name] = None
+                continue
+                
             collection_results[collection_name] = VECTOR_DB_CLIENT.get(
                 collection_name=collection_name
             )

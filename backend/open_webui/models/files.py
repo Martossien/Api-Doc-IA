@@ -179,6 +179,32 @@ class FilesTable:
                 for file in db.query(File).filter_by(user_id=user_id).all()
             ]
 
+    def get_file_by_hash_and_user(self, file_hash: str, user_id: str) -> Optional[FileModel]:
+        """
+        Get existing file by hash for deduplication.
+        Checks if user already has uploaded a file with identical content.
+        
+        Args:
+            file_hash: SHA-256 hash of file content
+            user_id: User ID
+            
+        Returns:
+            FileModel if duplicate found, None otherwise
+        """
+        with get_db() as db:
+            try:
+                # Check if file exists with same hash and either same user or public access
+                file = db.query(File).filter(
+                    File.data.contains({'checksum': file_hash})
+                ).filter_by(user_id=user_id).first()
+                
+                if file:
+                    return FileModel.model_validate(file)
+                return None
+            except Exception as e:
+                log.error(f"Error checking file hash {file_hash}: {e}")
+                return None
+
     def update_file_hash_by_id(self, id: str, hash: str) -> Optional[FileModel]:
         with get_db() as db:
             try:

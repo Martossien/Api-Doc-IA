@@ -543,6 +543,7 @@ start_server_with_monitoring() {
     if ! python -m uvicorn open_webui.main:app \
         --host "$HOST" \
         --port "$PORT" \
+        --h11-max-incomplete-event-size 65536 \
         --reload \
         --reload-dir "$BACKEND_PATH/open_webui" \
         --log-level "$LOG_LEVEL" 2>&1 | tee -a "$LOG_FILE" &

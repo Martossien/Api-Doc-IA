@@ -20,10 +20,10 @@ from pathlib import Path
 import json
 
 # Configuration des chemins
-BASE_DIR = Path("/home/admin_ia/api/Api-Doc-IA/backend/open_webui/data")
+BASE_DIR = Path("/home/admin_ia/Api-Doc-IA/backend/data")
 UPLOADS_DIRS = [
     BASE_DIR / "uploads",
-    Path("/home/admin_ia/api/Api-Doc-IA/backend/data/uploads")
+    Path("/home/admin_ia/Api-Doc-IA/backend/data/uploads")
 ]
 VECTOR_DB_DIR = BASE_DIR / "vector_db"
 CHROMA_DB = VECTOR_DB_DIR / "chroma.sqlite3"

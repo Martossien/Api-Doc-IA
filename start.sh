@@ -660,6 +660,78 @@ display_sqlite_status() {
 }
 
 # =============================================================================
+# PERFORMANCE: CHROMADB OPTIMIZATION
+# =============================================================================
+
+check_chromadb_performance() {
+    echo -e "${BLUE}🚀 Checking ChromaDB performance...${NC}"
+    
+    VECTOR_DB_DIR="$PROJECT_ROOT/backend/data/vector_db"
+    
+    if [ ! -d "$VECTOR_DB_DIR" ]; then
+        echo -e "${GREEN}✅ No vector DB found - clean startup${NC}"
+        return 0
+    fi
+    
+    # Count binary files and calculate size
+    VECTOR_FILES=$(find "$VECTOR_DB_DIR" -name "*.bin" | wc -l)
+    VECTOR_SIZE_MB=$(du -sm "$VECTOR_DB_DIR" | cut -f1)
+    VECTOR_COLLECTIONS=$(find "$VECTOR_DB_DIR" -maxdepth 1 -type d -name "*-*-*" | wc -l)
+    
+    echo -e "${BLUE}   Vector DB size: ${VECTOR_SIZE_MB}MB${NC}"
+    echo -e "${BLUE}   Collections: $VECTOR_COLLECTIONS${NC}" 
+    echo -e "${BLUE}   Binary files: $VECTOR_FILES${NC}"
+    
+    # Performance warnings and recommendations
+    PERFORMANCE_WARNING=false
+    
+    if [ "$VECTOR_FILES" -gt 500 ]; then
+        echo -e "${RED}   ⚠️ CRITICAL: $VECTOR_FILES files may cause VERY slow startup${NC}"
+        echo -e "${RED}   📝 Recommendation: Run cleanup_vector_db.py --aggressive${NC}"
+        PERFORMANCE_WARNING=true
+    elif [ "$VECTOR_FILES" -gt 200 ]; then
+        echo -e "${YELLOW}   ⚠️ WARNING: $VECTOR_FILES files may slow startup${NC}"
+        echo -e "${YELLOW}   📝 Recommendation: Consider running cleanup_vector_db.py${NC}"
+        PERFORMANCE_WARNING=true
+    fi
+    
+    if [ "$VECTOR_SIZE_MB" -gt 300 ]; then
+        echo -e "${YELLOW}   ⚠️ WARNING: Large ChromaDB (${VECTOR_SIZE_MB}MB)${NC}"
+        PERFORMANCE_WARNING=true
+    fi
+    
+    if [ "$PERFORMANCE_WARNING" = true ]; then
+        echo -e "${BLUE}   💡 For faster startup, consider using: ${GREEN}./start_fast.sh${NC}"
+        
+        # Give user choice to continue or cleanup
+        if [ -t 0 ]; then  # Only if running interactively
+            echo -e "${YELLOW}   Continue with slow startup? [y/N/cleanup]: ${NC}"
+            read -t 15 -r CONTINUE_CHOICE || CONTINUE_CHOICE="y"
+            
+            case "$CONTINUE_CHOICE" in
+                [Cc]|cleanup)
+                    echo -e "${BLUE}   🧹 Running ChromaDB cleanup...${NC}"
+                    if [ -f "$PROJECT_ROOT/cleanup_vector_db.py" ]; then
+                        python "$PROJECT_ROOT/cleanup_vector_db.py" --safe-cleanup --quiet || true
+                        echo -e "${GREEN}   ✅ Cleanup completed${NC}"
+                    else
+                        echo -e "${RED}   ❌ Cleanup script not found${NC}"
+                    fi
+                    ;;
+                [Nn]|"")
+                    echo -e "${BLUE}   💡 Use ./start_fast.sh for faster startup${NC}"
+                    ;;
+                *)
+                    echo -e "${BLUE}   ▶️ Continuing with startup...${NC}"
+                    ;;
+            esac
+        fi
+    else
+        echo -e "${GREEN}   ✅ ChromaDB size optimal for good performance${NC}"
+    fi
+}
+
+# =============================================================================
 # PYTHONPATH CONFIGURATION
 # =============================================================================
 
@@ -998,6 +1070,9 @@ main() {
     
     # Python path configuration
     configure_pythonpath
+    
+    # 🚀 PERFORMANCE: ChromaDB pre-check
+    check_chromadb_performance
     
     # SQLite environment loading and validation
     load_sqlite_environment_safely

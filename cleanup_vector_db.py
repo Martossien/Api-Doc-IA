@@ -66,11 +66,56 @@ class ChromaDBCleaner:
             raise
 
     def get_collections_to_cleanup(self, cutoff_time):
-        """Identifie les collections à supprimer basé sur l'âge des uploads"""
+        """Identifie les collections à supprimer basé sur l'âge"""
         collections_to_delete = []
         
         try:
-            # Analyser tous les répertoires d'uploads
+            # 🔧 MÉTHODE 1: Analyser les répertoires vector_db directement (plus efficace)
+            if VECTOR_DB_DIR.exists():
+                for vector_dir in VECTOR_DB_DIR.iterdir():
+                    if not vector_dir.is_dir():
+                        continue
+                    
+                    # Skip fichiers système ChromaDB    
+                    if vector_dir.name in ['chroma.sqlite3', 'chroma.db']:
+                        continue
+                        
+                    # Vérifier si c'est un UUID (format xxxx-xxxx-xxxx...)
+                    if '-' in vector_dir.name and len(vector_dir.name) >= 32:
+                        uuid = vector_dir.name
+                        
+                        # Vérifier l'âge du répertoire vector
+                        dir_mtime = datetime.fromtimestamp(vector_dir.stat().st_mtime)
+                        if dir_mtime < cutoff_time:
+                            # Chercher les fichiers upload correspondants
+                            associated_files = []
+                            for uploads_dir in UPLOADS_DIRS:
+                                if uploads_dir.exists():
+                                    associated_files.extend([
+                                        f for f in uploads_dir.iterdir() 
+                                        if f.is_file() and f.name.startswith(uuid + '_')
+                                    ])
+                            
+                            # Calculer taille totale (vector + uploads)
+                            vector_size = self._get_dir_size(vector_dir)
+                            upload_size = sum(f.stat().st_size for f in associated_files)
+                            total_size = vector_size + upload_size
+                            
+                            collections_to_delete.append({
+                                'collection_id': uuid,  # UUID direct
+                                'collection_name': f"vector-{uuid}",
+                                'uuid': uuid,
+                                'vector_dir': vector_dir,
+                                'upload_files': associated_files,
+                                'age': datetime.now() - dir_mtime,
+                                'size': total_size,
+                                'vector_size': vector_size,
+                                'upload_size': upload_size
+                            })
+            
+            # 🔧 MÉTHODE 2: Analyser les uploads orphelins (sans vector)
+            processed_uuids = {item['uuid'] for item in collections_to_delete}
+            
             for uploads_dir in UPLOADS_DIRS:
                 if not uploads_dir.exists():
                     continue
@@ -79,54 +124,49 @@ class ChromaDBCleaner:
                     if not upload_file.is_file():
                         continue
                         
-                    # Extraire l'UUID du nom de fichier (format: uuid_filename.ext)
+                    # Extraire l'UUID du nom de fichier
                     filename = upload_file.name
                     if '_' not in filename:
                         continue
                         
                     uuid = filename.split('_')[0]
-                    if len(uuid) != 36:  # UUID standard length
+                    if len(uuid) < 32 or uuid in processed_uuids:  # Skip déjà traités
                         continue
                     
                     # Vérifier l'âge du fichier upload
                     file_mtime = datetime.fromtimestamp(upload_file.stat().st_mtime)
                     if file_mtime < cutoff_time:
-                        collection_name = f"file-{uuid}"
+                        # Chercher tous les fichiers associés
+                        associated_files = []
+                        for udir in UPLOADS_DIRS:
+                            if udir.exists():
+                                associated_files.extend([
+                                    f for f in udir.iterdir() 
+                                    if f.is_file() and f.name.startswith(uuid + '_')
+                                ])
                         
-                        # Vérifier si la collection existe dans ChromaDB
-                        with self.get_database_connection() as conn:
-                            cursor = conn.cursor()
-                            cursor.execute(
-                                "SELECT id, name FROM collections WHERE name = ?", 
-                                (collection_name,)
-                            )
-                            collection = cursor.fetchone()
-                            
-                            if collection:
-                                # Chercher tous les fichiers associés à cet UUID dans tous les répertoires
-                                associated_files = []
-                                for udir in UPLOADS_DIRS:
-                                    if udir.exists():
-                                        associated_files.extend([
-                                            f for f in udir.iterdir() 
-                                            if f.is_file() and f.name.startswith(uuid + '_')
-                                        ])
-                                
-                                total_size = sum(f.stat().st_size for f in associated_files)
-                                
-                                collections_to_delete.append({
-                                    'collection_id': collection['id'],
-                                    'collection_name': collection['name'],
-                                    'uuid': uuid,
-                                    'upload_files': associated_files,
-                                    'age': datetime.now() - file_mtime,
-                                    'size': total_size
-                                })
+                        upload_size = sum(f.stat().st_size for f in associated_files)
+                        
+                        collections_to_delete.append({
+                            'collection_id': uuid,
+                            'collection_name': f"orphan-{uuid}",
+                            'uuid': uuid,
+                            'vector_dir': None,  # Pas de vector correspondant
+                            'upload_files': associated_files,
+                            'age': datetime.now() - file_mtime,
+                            'size': upload_size,
+                            'vector_size': 0,
+                            'upload_size': upload_size
+                        })
+                        processed_uuids.add(uuid)
                             
         except Exception as e:
             log.error(f"Erreur lors de l'identification des collections: {e}")
             self.stats['errors'].append(str(e))
             
+        # Trier par âge (plus ancien en premier)
+        collections_to_delete.sort(key=lambda x: x['age'], reverse=True)
+        
         return collections_to_delete
 
     def _get_dir_size(self, path):
@@ -208,23 +248,23 @@ class ChromaDBCleaner:
             log.info(f"✅ {len(upload_files)} fichiers upload supprimés")
         return success
 
-    def delete_vector_directory(self, uuid):
+    def delete_vector_directory(self, vector_dir):
         """Supprime le dossier vector correspondant"""
-        vector_path = VECTOR_DB_DIR / uuid
-        if vector_path.exists():
-            if self.dry_run:
-                log.info(f"[DRY-RUN] Suppression vector: {vector_path}")
-                return True
-                
-            try:
-                shutil.rmtree(vector_path)
-                log.info(f"✅ Vector supprimé: {vector_path}")
-                return True
-            except Exception as e:
-                log.error(f"❌ Erreur suppression vector {vector_path}: {e}")
-                self.stats['errors'].append(f"Vector {vector_path}: {e}")
-                return False
-        return True
+        if not vector_dir or not vector_dir.exists():
+            return True
+            
+        if self.dry_run:
+            log.info(f"[DRY-RUN] Suppression vector: {vector_dir}")
+            return True
+            
+        try:
+            shutil.rmtree(vector_dir)
+            log.info(f"✅ Vector supprimé: {vector_dir}")
+            return True
+        except Exception as e:
+            log.error(f"❌ Erreur suppression vector {vector_dir}: {e}")
+            self.stats['errors'].append(f"Vector {vector_dir}: {e}")
+            return False
 
     def cleanup(self, retention_hours=1):
         """Lance le nettoyage principal"""
@@ -245,34 +285,36 @@ class ChromaDBCleaner:
         
         # Traiter chaque collection
         for item in collections_to_delete:
-            log.info(f"🔄 Traitement: {item['collection_name']} (âge: {item['age']})")
+            log.info(f"🔄 Traitement: {item['collection_name']} (âge: {item['age']}, taille: {item['size']//1024//1024}MB)")
             
             success = True
             
-            # Supprimer de ChromaDB
-            if not self.delete_collection_from_chromadb(item['collection_id'], item['collection_name']):
-                success = False
+            # Supprimer le répertoire vector
+            if item.get('vector_dir'):
+                if self.delete_vector_directory(item['vector_dir']):
+                    self.stats['disk_space_freed'] += item['vector_size']
+                else:
+                    success = False
             
             # Supprimer les fichiers upload
-            if not self.delete_upload_files(item['upload_files']):
-                success = False
-                
-            # Supprimer le dossier vector
-            if not self.delete_vector_directory(item['uuid']):
-                success = False
+            if item['upload_files']:
+                if self.delete_upload_files(item['upload_files']):
+                    self.stats['disk_space_freed'] += item['upload_size']
+                    self.stats['uploads_deleted'] += len(item['upload_files'])
+                else:
+                    success = False
             
             if success:
                 self.stats['collections_deleted'] += 1
-                self.stats['disk_space_freed'] += item['size']
-                log.info(f"✅ Suppression complète: {item['collection_name']}")
+                log.info(f"✅ Collection {item['collection_name']} supprimée complètement")
             else:
-                log.warning(f"⚠️ Suppression partielle: {item['collection_name']}")
+                log.error(f"❌ Erreurs lors de la suppression de {item['collection_name']}")
         
         # Nettoyer les fichiers upload orphelins
         log.info("🗂️ Nettoyage des fichiers upload orphelins...")
         self.cleanup_orphan_uploads(cutoff_time)
         
-        # Nettoyer les entrées de base de données
+        # Nettoyer les entrées de base de données  
         log.info("🗄️ Nettoyage des entrées de base de données...")
         self.cleanup_database_entries(cutoff_time)
         

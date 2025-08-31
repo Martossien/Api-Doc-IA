@@ -48,6 +48,288 @@ SQLITE_STATUS="unknown"
 CHROMADB_STATUS="unknown"
 PYTHON_VERSION=""
 
+# =============================================================================
+# PROXY DETECTION AND CONFIGURATION
+# =============================================================================
+
+detect_and_configure_proxy() {
+    echo -e "${BLUE}🌐 Detecting proxy configuration...${NC}"
+    
+    # Check for existing proxy configuration
+    PROXY_DETECTED=false
+    CURRENT_HTTP_PROXY=""
+    CURRENT_HTTPS_PROXY=""
+    
+    # Check environment variables
+    if [ -n "$http_proxy" ] || [ -n "$HTTP_PROXY" ] || [ -n "$https_proxy" ] || [ -n "$HTTPS_PROXY" ]; then
+        PROXY_DETECTED=true
+        CURRENT_HTTP_PROXY="${http_proxy:-$HTTP_PROXY}"
+        CURRENT_HTTPS_PROXY="${https_proxy:-$HTTPS_PROXY}"
+        echo -e "${BLUE}   Proxy detected in environment variables${NC}"
+        echo -e "${BLUE}   HTTP Proxy: ${CURRENT_HTTP_PROXY:-none}${NC}"
+        echo -e "${BLUE}   HTTPS Proxy: ${CURRENT_HTTPS_PROXY:-none}${NC}"
+    fi
+    
+    # Check system proxy settings (common locations)
+    for proxy_file in "/etc/environment" "$HOME/.bashrc" "$HOME/.profile"; do
+        if [ -f "$proxy_file" ] && grep -q -i "proxy" "$proxy_file" 2>/dev/null; then
+            if ! $PROXY_DETECTED; then
+                echo -e "${BLUE}   Proxy configuration found in: $proxy_file${NC}"
+                PROXY_DETECTED=true
+            fi
+        fi
+    done
+    
+    if $PROXY_DETECTED; then
+        echo -e "${YELLOW}⚠️ Proxy detected - Configuring localhost exclusion for API tests${NC}"
+        
+        # Current NO_PROXY value
+        CURRENT_NO_PROXY="${NO_PROXY:-$no_proxy}"
+        
+        # Required exclusions for Api-Doc-IA
+        REQUIRED_EXCLUSIONS="127.0.0.1,localhost,0.0.0.0"
+        
+        # Build new NO_PROXY value
+        if [ -z "$CURRENT_NO_PROXY" ]; then
+            NEW_NO_PROXY="$REQUIRED_EXCLUSIONS"
+        else
+            # Check if already contains our exclusions
+            if echo "$CURRENT_NO_PROXY" | grep -q "127.0.0.1" && echo "$CURRENT_NO_PROXY" | grep -q "localhost"; then
+                echo -e "${GREEN}✅ Proxy exclusions already configured correctly${NC}"
+                NEW_NO_PROXY="$CURRENT_NO_PROXY"
+            else
+                NEW_NO_PROXY="$CURRENT_NO_PROXY,$REQUIRED_EXCLUSIONS"
+                echo -e "${BLUE}🔧 Adding localhost exclusions to NO_PROXY${NC}"
+            fi
+        fi
+        
+        # Export for this session
+        export NO_PROXY="$NEW_NO_PROXY"
+        export no_proxy="$NEW_NO_PROXY"
+        
+        echo -e "${GREEN}✅ NO_PROXY configured: $NEW_NO_PROXY${NC}"
+        
+        # Critical test for server startup
+        echo -e "${BLUE}🧪 Testing proxy bypass for localhost...${NC}"
+        if command -v curl >/dev/null 2>&1; then
+            if curl -s --max-time 3 http://127.0.0.1:8080/ >/dev/null 2>&1 || [ $? -eq 7 ]; then
+                echo -e "${GREEN}✅ Localhost access bypasses proxy correctly${NC}"
+            else
+                echo -e "${BLUE}💡 Localhost proxy bypass configured (server will test when running)${NC}"
+            fi
+        fi
+        
+    else
+        echo -e "${GREEN}✅ No proxy detected - direct internet access${NC}"
+    fi
+    
+    return 0
+}
+
+# =============================================================================
+# PERIODIC GIT UPDATE VERIFICATION
+# =============================================================================
+
+check_periodic_git_updates() {
+    # Configuration for update checks
+    UPDATE_CHECK_FREQUENCY=${UPDATE_CHECK_FREQUENCY:-daily}  # daily, weekly, never
+    UPDATE_CHECK_FILE="$PROJECT_ROOT/.last_update_check"
+    
+    # Skip if disabled
+    if [ "$UPDATE_CHECK_FREQUENCY" = "never" ]; then
+        return 0
+    fi
+    
+    # Check if we should perform the check
+    SHOULD_CHECK=false
+    
+    if [ ! -f "$UPDATE_CHECK_FILE" ]; then
+        SHOULD_CHECK=true
+    else
+        LAST_CHECK=$(cat "$UPDATE_CHECK_FILE" 2>/dev/null || echo "0")
+        CURRENT_TIME=$(date +%s)
+        
+        case "$UPDATE_CHECK_FREQUENCY" in
+            "daily")
+                CHECK_INTERVAL=$((24 * 3600))  # 24 hours
+                ;;
+            "weekly")
+                CHECK_INTERVAL=$((7 * 24 * 3600))  # 7 days
+                ;;
+            *)
+                CHECK_INTERVAL=$((24 * 3600))  # Default to daily
+                ;;
+        esac
+        
+        if [ $((CURRENT_TIME - LAST_CHECK)) -gt $CHECK_INTERVAL ]; then
+            SHOULD_CHECK=true
+        fi
+    fi
+    
+    if ! $SHOULD_CHECK; then
+        return 0
+    fi
+    
+    echo -e "${BLUE}📦 Checking for project updates (periodic check)...${NC}"
+    
+    # Check if we're in a git repository
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        echo -e "${YELLOW}💡 Not a git repository - update check skipped${NC}"
+        return 0
+    fi
+    
+    # Quick network test
+    if ! timeout 5 ping -c 1 8.8.8.8 > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️ No internet connectivity - update check skipped${NC}"
+        return 0
+    fi
+    
+    # Update timestamp
+    echo "$(date +%s)" > "$UPDATE_CHECK_FILE"
+    
+    # Save current state
+    CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
+    echo -e "${BLUE}   Current branch: $CURRENT_BRANCH${NC}"
+    
+    # Fetch latest changes (with short timeout for startup)
+    echo -e "${BLUE}🔄 Fetching latest changes...${NC}"
+    if timeout 15 git fetch origin 2>/dev/null; then
+        # Check if we're behind
+        BEHIND_COUNT=$(git rev-list --count HEAD..origin/$CURRENT_BRANCH 2>/dev/null || echo "0")
+        
+        if [ "$BEHIND_COUNT" -gt 0 ]; then
+            echo -e "${YELLOW}📦 Updates available! $BEHIND_COUNT commits behind origin${NC}"
+            echo -e "${YELLOW}💡 Consider updating after server shutdown${NC}"
+            echo ""
+            echo -e "${BLUE}Recent commits:${NC}"
+            git log --oneline -3 origin/$CURRENT_BRANCH ^HEAD 2>/dev/null || true
+            echo ""
+            
+            read -p "🔄 Update now (will restart server)? (y/N): " -n 1 -r UPDATE_CHOICE
+            echo ""
+            if [[ $UPDATE_CHOICE =~ ^[Yy]$ ]]; then
+                echo -e "${BLUE}🔄 Updating project...${NC}"
+                if git pull origin "$CURRENT_BRANCH"; then
+                    echo -e "${GREEN}✅ Project updated successfully${NC}"
+                    echo -e "${BLUE}💡 Restarting server with latest version...${NC}"
+                    sleep 2
+                    exec "$0" "$@"  # Restart script with same arguments
+                else
+                    echo -e "${RED}❌ Update failed - continuing with current version${NC}"
+                fi
+            else
+                echo -e "${BLUE}💡 Continuing with current version${NC}"
+                echo -e "${YELLOW}💡 To update later: git pull && ./start.sh${NC}"
+            fi
+        else
+            echo -e "${GREEN}✅ Project is up to date${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️ Could not fetch updates (timeout or network issue)${NC}"
+    fi
+    
+    echo ""
+    return 0
+}
+
+# =============================================================================
+# INTELLIGENT DEPENDENCY AUTO-REPAIR
+# =============================================================================
+
+auto_repair_dependencies() {
+    echo -e "${BLUE}🔧 Checking for missing dependencies...${NC}"
+    
+    # Critical dependencies for basic functionality
+    CRITICAL_DEPS=("fastapi" "uvicorn" "pydantic" "sqlalchemy" "requests")
+    MISSING_DEPS=()
+    
+    # Check each critical dependency
+    for dep in "${CRITICAL_DEPS[@]}"; do
+        if ! python -c "import $dep" 2>/dev/null; then
+            MISSING_DEPS+=("$dep")
+        fi
+    done
+    
+    # Check for specific common issues
+    
+    # ChromaDB check
+    if ! python -c "import chromadb" 2>/dev/null; then
+        echo -e "${YELLOW}⚠️ ChromaDB import issue detected${NC}"
+        MISSING_DEPS+=("chromadb")
+    fi
+    
+    # OpenAI check (optional but common)
+    if ! python -c "import openai" 2>/dev/null; then
+        echo -e "${BLUE}💡 OpenAI library not found (optional)${NC}"
+        MISSING_DEPS+=("openai")
+    fi
+    
+    if [ ${#MISSING_DEPS[@]} -eq 0 ]; then
+        echo -e "${GREEN}✅ All critical dependencies are available${NC}"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}📦 Missing dependencies detected: ${MISSING_DEPS[*]}${NC}"
+    echo -e "${BLUE}This can happen if:${NC}"
+    echo -e "${BLUE}  - Virtual environment not activated${NC}"
+    echo -e "${BLUE}  - Dependencies not fully installed${NC}"
+    echo -e "${BLUE}  - Requirements.txt has been updated${NC}"
+    echo ""
+    
+    read -p "🔧 Attempt automatic repair (install missing packages)? (Y/n): " -r REPAIR_CHOICE
+    if [[ ! $REPAIR_CHOICE =~ ^[Nn]$ ]]; then
+        echo -e "${BLUE}🔄 Installing missing dependencies...${NC}"
+        
+        # Prepare pip command
+        REQUIREMENTS_FILE="$BACKEND_PATH/requirements.txt"
+        
+        if [ -f "$REQUIREMENTS_FILE" ]; then
+            # Full requirements installation (safest)
+            echo -e "${BLUE}📦 Reinstalling from requirements.txt (recommended)...${NC}"
+            if python -m pip install -r "$REQUIREMENTS_FILE" --quiet --no-warn-script-location; then
+                echo -e "${GREEN}✅ Dependencies installed successfully${NC}"
+                
+                # Verify repair
+                STILL_MISSING=()
+                for dep in "${CRITICAL_DEPS[@]}"; do
+                    if ! python -c "import $dep" 2>/dev/null; then
+                        STILL_MISSING+=("$dep")
+                    fi
+                done
+                
+                if [ ${#STILL_MISSING[@]} -eq 0 ]; then
+                    echo -e "${GREEN}✅ All critical dependencies now available${NC}"
+                else
+                    echo -e "${YELLOW}⚠️ Some dependencies still missing: ${STILL_MISSING[*]}${NC}"
+                    echo -e "${YELLOW}💡 You may need to check your Python environment${NC}"
+                fi
+            else
+                echo -e "${RED}❌ Failed to install dependencies${NC}"
+                echo -e "${YELLOW}💡 Try manual installation: pip install -r $REQUIREMENTS_FILE${NC}"
+            fi
+        else
+            # Individual package installation
+            echo -e "${BLUE}📦 Installing individual packages...${NC}"
+            for dep in "${MISSING_DEPS[@]}"; do
+                echo -e "${BLUE}   Installing $dep...${NC}"
+                if python -m pip install "$dep" --quiet --no-warn-script-location; then
+                    echo -e "${GREEN}   ✅ $dep installed${NC}"
+                else
+                    echo -e "${RED}   ❌ Failed to install $dep${NC}"
+                fi
+            done
+        fi
+        
+        echo ""
+    else
+        echo -e "${YELLOW}⚠️ Continuing with missing dependencies${NC}"
+        echo -e "${YELLOW}💡 Server may fail to start properly${NC}"
+        echo -e "${YELLOW}💡 To fix manually: pip install -r backend/requirements.txt${NC}"
+    fi
+    
+    return 0
+}
+
 # Cleanup function
 cleanup() {
     echo -e "\n${YELLOW}⚠️ Shutting down...${NC}"
@@ -80,33 +362,94 @@ detect_and_activate_python() {
     
     # Check if conda is available
     if command -v conda >/dev/null 2>&1; then
-        # Initialize conda for this script
+        # Initialize conda for this script (critical for environment detection)
         eval "$(conda shell.bash hook)" 2>/dev/null || true
         
-        CURRENT_ENV=$(conda info --envs | grep '*' | awk '{print $1}' 2>/dev/null || echo "base")
+        # ULTRA-ROBUST: Force conda activation FIRST, then detect
+        # Source conda directly to ensure variables are available
+        CONDA_BASE=$(conda info --base 2>/dev/null)
+        if [ -n "$CONDA_BASE" ]; then
+            source "$CONDA_BASE/etc/profile.d/conda.sh" 2>/dev/null || true
+        fi
+        
+        # Now get environment from multiple sources
+        ENV_FROM_VAR="${CONDA_DEFAULT_ENV:-base}"
+        ENV_FROM_CMD=$(conda info --envs 2>/dev/null | grep '*' | awk '{print $1}' 2>/dev/null | head -1 || echo "base")
+        ENV_FROM_INFO=$(conda info 2>/dev/null | grep "active environment" | awk '{print $4}' 2>/dev/null || echo "base")
+        ENV_FROM_PROMPT=$(echo "$PS1" | grep -o '([^)]*)' | head -1 | sed 's/[()]//g' 2>/dev/null || echo "")
+        
+        # MOST RELIABLE: Parse from actual Python executable path
+        PYTHON_PATH=$(which python 2>/dev/null || which python3 2>/dev/null || echo "")
+        ENV_FROM_PYTHON=""
+        if [ -n "$PYTHON_PATH" ] && echo "$PYTHON_PATH" | grep -q "/envs/"; then
+            ENV_FROM_PYTHON=$(echo "$PYTHON_PATH" | grep -o '/envs/[^/]*' | cut -d'/' -f3)
+        fi
+        
+        # FALLBACK: Parse from process environment if all else fails
+        ENV_FROM_PROC=$(ps -p $$ -o command= 2>/dev/null | grep -o 'conda.*activate [^[:space:]]*' | awk '{print $NF}' || echo "")
+        
+        echo -e "${BLUE}   Debug: VAR='$ENV_FROM_VAR', CMD='$ENV_FROM_CMD', INFO='$ENV_FROM_INFO', PROMPT='$ENV_FROM_PROMPT', PYTHON='$ENV_FROM_PYTHON'${NC}"
+        
+        # Use the most reliable non-base source (priority order: PYTHON first!)
+        CURRENT_ENV="$ENV_FROM_VAR"
+        if [ "$CURRENT_ENV" = "base" ] && [ -n "$ENV_FROM_PYTHON" ] && [ "$ENV_FROM_PYTHON" != "base" ]; then
+            CURRENT_ENV="$ENV_FROM_PYTHON"
+        fi
+        if [ "$CURRENT_ENV" = "base" ] && [ "$ENV_FROM_CMD" != "base" ]; then
+            CURRENT_ENV="$ENV_FROM_CMD"
+        fi
+        if [ "$CURRENT_ENV" = "base" ] && [ "$ENV_FROM_INFO" != "base" ]; then
+            CURRENT_ENV="$ENV_FROM_INFO"
+        fi
+        if [ "$CURRENT_ENV" = "base" ] && [ -n "$ENV_FROM_PROMPT" ] && [ "$ENV_FROM_PROMPT" != "base" ]; then
+            CURRENT_ENV="$ENV_FROM_PROMPT"
+        fi
+        if [ "$CURRENT_ENV" = "base" ] && [ -n "$ENV_FROM_PROC" ] && [ "$ENV_FROM_PROC" != "base" ]; then
+            CURRENT_ENV="$ENV_FROM_PROC"
+        fi
+        
         echo -e "${BLUE}   Current conda environment: $CURRENT_ENV${NC}"
         
-        # Auto-activate test-api-doc-ia environment if it exists and not active
-        if [ "$CURRENT_ENV" != "test-api-doc-ia" ] && conda env list | grep -q "test-api-doc-ia"; then
-            echo -e "${BLUE}🔄 Auto-activating conda environment 'test-api-doc-ia'...${NC}"
+        # FLEXIBLE LOGIC: Handle ANY conda environment name
+        if [ "$CURRENT_ENV" = "base" ]; then
+            echo -e "${YELLOW}⚠️ Currently in 'base' environment${NC}"
+            echo -e "${BLUE}💡 Recommended: Use a dedicated environment for Api-Doc-IA${NC}"
             
-            conda activate test-api-doc-ia
-            
-            # Verify activation
-            CURRENT_ENV=$(conda info --envs | grep '*' | awk '{print $1}' 2>/dev/null || echo "base")
-            if [ "$CURRENT_ENV" = "test-api-doc-ia" ]; then
-                echo -e "${GREEN}✅ Environment 'test-api-doc-ia' activated successfully${NC}"
-                USING_CONDA_ENV=true
-            else
-                echo -e "${YELLOW}⚠️ Failed to activate environment, using current: $CURRENT_ENV${NC}"
-                USING_CONDA_ENV=false
+            # Look for common Api-Doc-IA environment names
+            if conda env list | grep -q "api-doc-ia"; then
+                echo -e "${BLUE}🔄 Found 'api-doc-ia' environment. Switch to it? (Y/n): ${NC}"
+                read -r -t 10 SWITCH_CHOICE || SWITCH_CHOICE="Y"
+                if [[ ! $SWITCH_CHOICE =~ ^[Nn]$ ]]; then
+                    conda activate api-doc-ia
+                    CURRENT_ENV="api-doc-ia"
+                    echo -e "${GREEN}✅ Switched to 'api-doc-ia' environment${NC}"
+                fi
+            elif conda env list | grep -q "test-api-doc-ia"; then
+                echo -e "${BLUE}🔄 Found 'test-api-doc-ia' environment. Switch to it? (Y/n): ${NC}"
+                read -r -t 10 SWITCH_CHOICE || SWITCH_CHOICE="Y"
+                if [[ ! $SWITCH_CHOICE =~ ^[Nn]$ ]]; then
+                    conda activate test-api-doc-ia
+                    CURRENT_ENV="test-api-doc-ia"
+                    echo -e "${GREEN}✅ Switched to 'test-api-doc-ia' environment${NC}"
+                fi
             fi
-        elif [ "$CURRENT_ENV" = "test-api-doc-ia" ]; then
-            echo -e "${GREEN}✅ Already using conda environment 'test-api-doc-ia'${NC}"
+            
+            # Final confirmation for base environment
+            if [ "$CURRENT_ENV" = "base" ]; then
+                echo -e "${YELLOW}⚠️ Continuing with 'base' environment${NC}"
+                echo -e "${BLUE}💡 This may cause dependency conflicts. Continue anyway? (y/N): ${NC}"
+                read -r -t 10 BASE_CHOICE || BASE_CHOICE="N"
+                if [[ ! $BASE_CHOICE =~ ^[Yy]$ ]]; then
+                    echo -e "${RED}❌ Aborted by user. Please activate a proper environment first.${NC}"
+                    echo -e "${BLUE}💡 Example: conda activate your-environment${NC}"
+                    exit 1
+                fi
+            fi
             USING_CONDA_ENV=true
         else
-            echo -e "${YELLOW}⚠️ Using conda environment: $CURRENT_ENV${NC}"
-            USING_CONDA_ENV=false
+            # ANY non-base environment: Continue directly (no interruption for daily use)
+            echo -e "${GREEN}✅ Using conda environment: '$CURRENT_ENV'${NC}"
+            USING_CONDA_ENV=true
         fi
     else
         echo -e "${YELLOW}⚠️ Conda not found, using system Python${NC}"
@@ -641,6 +984,10 @@ display_startup_information() {
 # =============================================================================
 
 main() {
+    # Network and update checks (proxy detection + periodic git updates)
+    detect_and_configure_proxy
+    check_periodic_git_updates
+    
     # Pre-flight checks
     if ! perform_preflight_checks; then
         exit 1
@@ -657,6 +1004,9 @@ main() {
     
     # Dependency checks
     check_dependencies
+    
+    # Auto-repair missing dependencies if needed
+    auto_repair_dependencies
     
     # Server environment preparation
     prepare_server_environment

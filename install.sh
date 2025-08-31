@@ -51,6 +51,150 @@ UBUNTU_VERSION=""
 CUSTOM_SQLITE_COMPILED=false
 CHROMADB_STATUS="unknown"
 
+# =============================================================================
+# PROXY DETECTION AND CONFIGURATION
+# =============================================================================
+
+detect_and_configure_proxy() {
+    echo -e "${BLUE}🌐 Detecting proxy configuration...${NC}"
+    
+    # Check for existing proxy configuration
+    PROXY_DETECTED=false
+    CURRENT_HTTP_PROXY=""
+    CURRENT_HTTPS_PROXY=""
+    
+    # Check environment variables
+    if [ -n "$http_proxy" ] || [ -n "$HTTP_PROXY" ] || [ -n "$https_proxy" ] || [ -n "$HTTPS_PROXY" ]; then
+        PROXY_DETECTED=true
+        CURRENT_HTTP_PROXY="${http_proxy:-$HTTP_PROXY}"
+        CURRENT_HTTPS_PROXY="${https_proxy:-$HTTPS_PROXY}"
+        echo -e "${BLUE}   Proxy detected in environment variables${NC}"
+        echo -e "${BLUE}   HTTP Proxy: ${CURRENT_HTTP_PROXY:-none}${NC}"
+        echo -e "${BLUE}   HTTPS Proxy: ${CURRENT_HTTPS_PROXY:-none}${NC}"
+    fi
+    
+    # Check system proxy settings (common locations)
+    for proxy_file in "/etc/environment" "$HOME/.bashrc" "$HOME/.profile"; do
+        if [ -f "$proxy_file" ] && grep -q -i "proxy" "$proxy_file" 2>/dev/null; then
+            if ! $PROXY_DETECTED; then
+                echo -e "${BLUE}   Proxy configuration found in: $proxy_file${NC}"
+                PROXY_DETECTED=true
+            fi
+        fi
+    done
+    
+    if $PROXY_DETECTED; then
+        echo -e "${YELLOW}⚠️ Proxy detected - Configuring localhost exclusion for API tests${NC}"
+        
+        # Current NO_PROXY value
+        CURRENT_NO_PROXY="${NO_PROXY:-$no_proxy}"
+        
+        # Required exclusions for Api-Doc-IA
+        REQUIRED_EXCLUSIONS="127.0.0.1,localhost,0.0.0.0"
+        
+        # Build new NO_PROXY value
+        if [ -z "$CURRENT_NO_PROXY" ]; then
+            NEW_NO_PROXY="$REQUIRED_EXCLUSIONS"
+        else
+            # Check if already contains our exclusions
+            if echo "$CURRENT_NO_PROXY" | grep -q "127.0.0.1" && echo "$CURRENT_NO_PROXY" | grep -q "localhost"; then
+                echo -e "${GREEN}✅ Proxy exclusions already configured correctly${NC}"
+                NEW_NO_PROXY="$CURRENT_NO_PROXY"
+            else
+                NEW_NO_PROXY="$CURRENT_NO_PROXY,$REQUIRED_EXCLUSIONS"
+                echo -e "${BLUE}🔧 Adding localhost exclusions to NO_PROXY${NC}"
+            fi
+        fi
+        
+        # Export for this session
+        export NO_PROXY="$NEW_NO_PROXY"
+        export no_proxy="$NEW_NO_PROXY"
+        
+        echo -e "${GREEN}✅ NO_PROXY configured: $NEW_NO_PROXY${NC}"
+        
+        # Test proxy bypass for localhost
+        echo -e "${BLUE}🧪 Testing proxy bypass for localhost...${NC}"
+        if command -v curl >/dev/null 2>&1; then
+            if curl -s --max-time 5 http://127.0.0.1:8080/ >/dev/null 2>&1 || [ $? -eq 7 ]; then
+                echo -e "${GREEN}✅ Localhost access bypasses proxy correctly${NC}"
+            else
+                echo -e "${YELLOW}⚠️ Localhost proxy bypass test inconclusive (server not running)${NC}"
+            fi
+        else
+            echo -e "${YELLOW}💡 curl not available - proxy bypass test skipped${NC}"
+        fi
+        
+    else
+        echo -e "${GREEN}✅ No proxy detected - direct internet access${NC}"
+    fi
+    
+    return 0
+}
+
+# =============================================================================
+# GIT UPDATE VERIFICATION
+# =============================================================================
+
+check_git_updates() {
+    echo -e "${BLUE}📦 Checking for project updates...${NC}"
+    
+    # Check if we're in a git repository
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        echo -e "${YELLOW}💡 Not a git repository - update check skipped${NC}"
+        return 0
+    fi
+    
+    # Check if we have network connectivity
+    if ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️ No internet connectivity - update check skipped${NC}"
+        return 0
+    fi
+    
+    # Save current state
+    CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
+    echo -e "${BLUE}   Current branch: $CURRENT_BRANCH${NC}"
+    
+    # Fetch latest changes (with timeout)
+    echo -e "${BLUE}🔄 Fetching latest changes...${NC}"
+    if timeout 30 git fetch origin 2>/dev/null; then
+        # Check if we're behind
+        BEHIND_COUNT=$(git rev-list --count HEAD..origin/$CURRENT_BRANCH 2>/dev/null || echo "0")
+        
+        if [ "$BEHIND_COUNT" -gt 0 ]; then
+            echo -e "${YELLOW}📦 Updates available! $BEHIND_COUNT commits behind origin${NC}"
+            echo -e "${YELLOW}💡 It's recommended to update before installation${NC}"
+            echo ""
+            echo -e "${BLUE}Recent commits:${NC}"
+            git log --oneline -5 origin/$CURRENT_BRANCH ^HEAD 2>/dev/null || true
+            echo ""
+            
+            read -p "🔄 Update now before installation? (Y/n): " -r UPDATE_CHOICE
+            if [[ ! $UPDATE_CHOICE =~ ^[Nn]$ ]]; then
+                echo -e "${BLUE}🔄 Updating project...${NC}"
+                if git pull origin "$CURRENT_BRANCH"; then
+                    echo -e "${GREEN}✅ Project updated successfully${NC}"
+                    echo -e "${BLUE}💡 Restarting installation script with latest version...${NC}"
+                    sleep 2
+                    exec "$0" "$@"  # Restart script with same arguments
+                else
+                    echo -e "${RED}❌ Update failed - continuing with current version${NC}"
+                    echo -e "${YELLOW}💡 You can update manually later with: git pull${NC}"
+                fi
+            else
+                echo -e "${BLUE}💡 Continuing with current version${NC}"
+            fi
+        else
+            echo -e "${GREEN}✅ Project is up to date${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️ Could not fetch updates (timeout or network issue)${NC}"
+        echo -e "${YELLOW}💡 Continuing with current version${NC}"
+    fi
+    
+    echo ""
+    return 0
+}
+
 echo -e "${BLUE}📋 Configuration:${NC}"
 echo -e "${BLUE}   Installation mode: $INSTALLATION_MODE${NC}"
 echo -e "${BLUE}   SQLite strategy: $SQLITE_FALLBACK_STRATEGY${NC}"
@@ -817,6 +961,97 @@ except:
 setup_python_env() {
     echo -e "${BLUE}🐍 Setting up Python environment...${NC}"
     
+    # CRITICAL: Detect if environment is already active (partial installation)
+    EXISTING_ENV_DETECTED=false
+    EXISTING_ENV_TYPE=""
+    EXISTING_ENV_NAME=""
+    
+    # Check for active conda environment (DIRECT DETECTION)
+    if command -v conda >/dev/null 2>&1; then
+        echo -e "${BLUE}🔍 Detecting active conda environment...${NC}"
+        
+        # Direct detection using conda commands (more reliable than env vars)
+        DETECTED_ENV=$(conda info --envs 2>/dev/null | grep '*' | awk '{print $1}' | head -1 2>/dev/null || echo "base")
+        
+        # Fallback: try conda info directly  
+        if [ "$DETECTED_ENV" = "base" ] || [ -z "$DETECTED_ENV" ]; then
+            DETECTED_ENV=$(conda info 2>/dev/null | grep "active environment" | awk '{print $4}' 2>/dev/null || echo "base")
+        fi
+        
+        echo -e "${BLUE}   Detected environment: '$DETECTED_ENV'${NC}"
+        
+        if [ "$DETECTED_ENV" != "base" ] && [ -n "$DETECTED_ENV" ]; then
+            EXISTING_ENV_DETECTED=true
+            EXISTING_ENV_TYPE="conda"
+            EXISTING_ENV_NAME="$DETECTED_ENV"
+            echo -e "${YELLOW}🔍 Existing conda environment detected: $EXISTING_ENV_NAME${NC}"
+        else
+            echo -e "${BLUE}💡 No dedicated conda environment detected (in 'base' or none)${NC}"
+        fi
+    fi
+    
+    # Check for active pyenv environment
+    if command -v pyenv >/dev/null 2>&1 && [ -n "$PYENV_VERSION" ]; then
+        if ! $EXISTING_ENV_DETECTED; then  # Only if conda not already detected
+            EXISTING_ENV_DETECTED=true
+            EXISTING_ENV_TYPE="pyenv"
+            EXISTING_ENV_NAME="$PYENV_VERSION"
+            echo -e "${YELLOW}🔍 Existing pyenv environment detected: $EXISTING_ENV_NAME${NC}"
+        fi
+    fi
+    
+    # Check for active virtual environment
+    if [ -n "$VIRTUAL_ENV" ] && ! $EXISTING_ENV_DETECTED; then
+        EXISTING_ENV_DETECTED=true
+        EXISTING_ENV_TYPE="venv"
+        EXISTING_ENV_NAME=$(basename "$VIRTUAL_ENV")
+        echo -e "${YELLOW}🔍 Existing virtual environment detected: $EXISTING_ENV_NAME${NC}"
+    fi
+    
+    # Respect existing environment (UNIVERSAL: works with ANY environment name)
+    if $EXISTING_ENV_DETECTED; then
+        echo -e "${BLUE}💡 Active environment detected - respecting your choice${NC}"
+        echo -e "${BLUE}   Type: $EXISTING_ENV_TYPE${NC}"
+        echo -e "${BLUE}   Name: '$EXISTING_ENV_NAME'${NC}"
+        echo ""
+        echo -e "${BLUE}🤔 Continue installation in this environment?${NC}"
+        echo -e "${BLUE}   • (Y)es: Install Api-Doc-IA in '$EXISTING_ENV_NAME'${NC}"
+        echo -e "${BLUE}   • (N)o: Exit and let you choose another environment${NC}"
+        read -p "Your choice (Y/n): " -r
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            echo -e "${GREEN}✅ Using existing $EXISTING_ENV_TYPE environment: $EXISTING_ENV_NAME${NC}"
+            
+            # Set appropriate flags
+            case "$EXISTING_ENV_TYPE" in
+                "conda")
+                    USING_CONDA=true
+                    PYTHON_CMD="python"  # In conda env, use 'python'
+                    ;;
+                "pyenv")
+                    USING_VENV=false
+                    USING_CONDA=false
+                    PYTHON_CMD="python"
+                    ;;
+                "venv")
+                    USING_VENV=true
+                    PYTHON_CMD="python"  # In venv, use 'python'
+                    ;;
+            esac
+            
+            PYTHON_VERSION=$($PYTHON_CMD --version 2>&1)
+            echo -e "${BLUE}   Python version in existing environment: $PYTHON_VERSION${NC}"
+            return 0
+        else
+            echo -e "${YELLOW}⚠️ Installation aborted by user choice${NC}"
+            echo -e "${BLUE}💡 To use a different environment:${NC}"
+            echo -e "${BLUE}   1. conda activate your-preferred-environment${NC}"
+            echo -e "${BLUE}   2. ./install.sh${NC}"
+            echo ""
+            echo -e "${BLUE}💡 To proceed anyway with current environment, run install.sh again${NC}"
+            exit 1
+        fi
+    fi
+    
     # Ensure we have a Python command set
     if [ -z "$PYTHON_CMD" ]; then
         if command -v python3.11 >/dev/null 2>&1; then
@@ -833,9 +1068,39 @@ setup_python_env() {
     PYTHON_VERSION=$($PYTHON_CMD --version 2>&1)
     echo -e "${BLUE}   Python version: $PYTHON_VERSION${NC}"
     
-    # Check if conda is available
+    # Check if conda is available and if we're already in a dedicated environment
     if command -v conda >/dev/null 2>&1; then
         echo -e "${GREEN}✅ Conda found${NC}"
+        
+        # Re-check current environment (same robust logic as earlier)
+        eval "$(conda shell.bash hook)" 2>/dev/null || true
+        ENV_FROM_VAR="${CONDA_DEFAULT_ENV:-base}"
+        ENV_FROM_CMD=$(conda info --envs 2>/dev/null | grep '*' | awk '{print $1}' 2>/dev/null | head -1 || echo "base")
+        PYTHON_PATH=$(which python 2>/dev/null || which python3 2>/dev/null || echo "")
+        ENV_FROM_PYTHON=""
+        if [ -n "$PYTHON_PATH" ] && echo "$PYTHON_PATH" | grep -q "/envs/"; then
+            ENV_FROM_PYTHON=$(echo "$PYTHON_PATH" | grep -o '/envs/[^/]*' | cut -d'/' -f3)
+        fi
+        CURRENT_ENV="${ENV_FROM_VAR}"
+        if [ "$CURRENT_ENV" = "base" ] && [ -n "$ENV_FROM_PYTHON" ] && [ "$ENV_FROM_PYTHON" != "base" ]; then
+            CURRENT_ENV="$ENV_FROM_PYTHON"
+        fi
+        if [ "$CURRENT_ENV" = "base" ] && [ "$ENV_FROM_CMD" != "base" ]; then
+            CURRENT_ENV="$ENV_FROM_CMD"
+        fi
+        
+        if [ "$CURRENT_ENV" != "base" ]; then
+            echo -e "${BLUE}💡 You are currently in conda environment: '$CURRENT_ENV'${NC}"
+            read -p "🤔 Use '$CURRENT_ENV' as the dedicated environment for Api-Doc-IA? (Y/n): " -r
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                echo -e "${GREEN}✅ Using existing environment '$CURRENT_ENV' for Api-Doc-IA${NC}"
+                USING_CONDA=true
+                PYTHON_CMD="python"
+                return 0
+            else
+                echo -e "${YELLOW}💡 Will create a new dedicated environment instead${NC}"
+            fi
+        fi
         
         read -p "Do you want to create a dedicated conda environment? (Y/n): " -r
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
@@ -1064,6 +1329,60 @@ EOF
 }
 
 # =============================================================================
+# DATABASE MIGRATION PROTECTION
+# =============================================================================
+
+check_and_fix_database_migrations() {
+    echo -e "${BLUE}🔍 Checking database migration integrity...${NC}"
+    
+    # Check if corrupted webui.db exists
+    if [ -f "$PROJECT_ROOT/backend/data/webui.db" ]; then
+        echo -e "${YELLOW}⚠️ Existing database found - checking for corruption...${NC}"
+        
+        # Test if we can run a simple query without Alembic errors
+        cd "$PROJECT_ROOT/backend" 2>/dev/null || return 1
+        
+        # Quick corruption test using Python
+        if $PYTHON_CMD -c "
+import sys
+import os
+sys.path.insert(0, os.getcwd())
+try:
+    import sqlite3
+    conn = sqlite3.connect('data/webui.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT name FROM sqlite_master WHERE type=\"table\" AND name=\"config\";')
+    result = cursor.fetchone()
+    conn.close()
+    if not result:
+        print('NO_CONFIG_TABLE')
+    else:
+        print('CONFIG_OK')
+except Exception as e:
+    print(f'DB_ERROR:{str(e)}')
+        " 2>/dev/null | grep -q "NO_CONFIG_TABLE\|DB_ERROR"; then
+            echo -e "${RED}❌ Database corruption detected (missing tables or Alembic conflicts)${NC}"
+            echo -e "${YELLOW}💡 Creating backup and starting fresh...${NC}"
+            
+            # Create backup with timestamp
+            BACKUP_NAME="webui.db.backup.$(date +%Y%m%d_%H%M%S).corrupted"
+            mv "data/webui.db" "data/$BACKUP_NAME" 2>/dev/null
+            
+            echo -e "${GREEN}✅ Corrupted database backed up as: $BACKUP_NAME${NC}"
+            echo -e "${BLUE}💡 Fresh database will be created on first startup${NC}"
+        else
+            echo -e "${GREEN}✅ Existing database appears healthy${NC}"
+        fi
+        
+        cd "$PROJECT_ROOT" 2>/dev/null || return 1
+    else
+        echo -e "${BLUE}💡 No existing database - will be created fresh on first startup${NC}"
+    fi
+    
+    echo -e "${GREEN}✅ Database migration check completed${NC}"
+}
+
+# =============================================================================
 # VERIFICATION
 # =============================================================================
 
@@ -1212,6 +1531,14 @@ main() {
     detect_os
     echo ""
     
+    # Proxy detection and configuration (critical for network operations)
+    detect_and_configure_proxy
+    echo ""
+    
+    # Git updates check (before any system changes)
+    check_git_updates
+    echo ""
+    
     # System dependencies (includes Python 3.11 check and ISOLATED SQLite handling)
     install_system_deps
     echo ""
@@ -1226,6 +1553,10 @@ main() {
     
     # Configuration
     setup_configuration
+    echo ""
+    
+    # Database migration check (prevent multiple heads issue)
+    check_and_fix_database_migrations
     echo ""
     
     # Verification

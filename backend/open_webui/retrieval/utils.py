@@ -420,7 +420,74 @@ def get_embedding_function(
         raise ValueError(f"Unknown embedding engine: {embedding_engine}")
 
 
-def get_sources_from_files(
+# 🔧 WRAPPER INTELLIGENT - Fonction de détection API v2
+def is_api_v2_request(request) -> bool:
+    """
+    Détecte si une requête provient de l'API v2 basée sur le path
+    API v2 utilise le préfixe /api/v2/
+    """
+    if hasattr(request, 'url') and request.url:
+        path = str(request.url.path)
+        is_v2 = path.startswith('/api/v2/')
+        log.debug(f"🔍 Request path: {path}, Is API v2: {is_v2}")
+        return is_v2
+    return False
+
+
+# 🚀 WRAPPER INTELLIGENT - Fonction de sources intelligente
+def get_sources_intelligent_wrapper(
+    request,
+    files,
+    queries,
+    embedding_function,
+    k,
+    reranking_function,
+    k_reranker,
+    r,
+    hybrid_search,
+    full_context=False,
+    user: Optional[UserModel] = None,
+):
+    """
+    Wrapper intelligent qui choisit la meilleure stratégie selon l'origine de la requête:
+    - API v2: Utilise get_sources_from_files_original (stable, testée)
+    - API v1 web: Utilise version améliorée avec meilleure gestion d'erreurs
+    """
+    is_v2 = is_api_v2_request(request)
+    
+    if is_v2:
+        log.info("🚀 API v2 détectée - utilisation fonction originale stable")
+        return get_sources_from_files_original(
+            request=request,
+            files=files,
+            queries=queries,
+            embedding_function=embedding_function,
+            k=k,
+            reranking_function=reranking_function,
+            k_reranker=k_reranker,
+            r=r,
+            hybrid_search=hybrid_search,
+            full_context=full_context,
+        )
+    else:
+        log.info("🌐 API v1 web détectée - utilisation version améliorée")
+        return get_sources_from_files_enhanced(
+            request=request,
+            files=files,
+            queries=queries,
+            embedding_function=embedding_function,
+            k=k,
+            reranking_function=reranking_function,
+            k_reranker=k_reranker,
+            r=r,
+            hybrid_search=hybrid_search,
+            full_context=full_context,
+            user=user,
+        )
+
+
+# 🔄 FONCTION ORIGINALE RENOMMÉE - Pour API v2 (stable)
+def get_sources_from_files_original(
     request,
     files,
     queries,
@@ -589,6 +656,260 @@ def get_sources_from_files(
             log.exception(e)
 
     return sources
+
+
+# 🚀 FONCTION ENHANCED - Pour API v1 web (avec améliorations)
+def get_sources_from_files_enhanced(
+    request,
+    files,
+    queries,
+    embedding_function,
+    k,
+    reranking_function,
+    k_reranker,
+    r,
+    hybrid_search,
+    full_context=False,
+    user: Optional[UserModel] = None,
+):
+    """
+    Version améliorée de get_sources_from_files avec:
+    - Meilleure gestion d'erreurs
+    - Vérification d'existence des collections
+    - Fallback automatique vers mode "full" si échec RAG
+    - Logs détaillés pour debugging
+    """
+    log.debug(
+        f"🔍 Enhanced files: {files} {queries} {embedding_function} {reranking_function} {full_context}"
+    )
+    log.info(f"🌐 Processing {len(files) if files else 0} files for web interface")
+
+    extracted_collections = []
+    relevant_contexts = []
+
+    for file_idx, file in enumerate(files):
+        log.debug(f"📄 Processing file {file_idx + 1}/{len(files)}: {file.get('name', 'unknown')}")
+        
+        context = None
+        if file.get("docs"):
+            # BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
+            log.debug("📋 Using docs bypass mode")
+            context = {
+                "documents": [[doc.get("content") for doc in file.get("docs")]],
+                "metadatas": [[doc.get("metadata") for doc in file.get("docs")]],
+            }
+        elif file.get("context") == "full":
+            # Manual Full Mode Toggle - MOST RELIABLE FOR WEB
+            log.info("🎯 Using FULL context mode - bypassing RAG for reliability")
+            context = {
+                "documents": [[file.get("file").get("data", {}).get("content")]],
+                "metadatas": [[{"file_id": file.get("id"), "name": file.get("name")}]],
+            }
+        elif (
+            file.get("type") != "web_search"
+            and request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL
+        ):
+            # BYPASS_EMBEDDING_AND_RETRIEVAL
+            log.debug("⚡ Using embedding bypass mode")
+            if file.get("type") == "collection":
+                file_ids = file.get("data", {}).get("file_ids", [])
+
+                documents = []
+                metadatas = []
+                for file_id in file_ids:
+                    file_object = Files.get_file_by_id(file_id)
+
+                    if file_object:
+                        documents.append(file_object.data.get("content", ""))
+                        metadatas.append(
+                            {
+                                "file_id": file_id,
+                                "name": file_object.filename,
+                                "source": file_object.filename,
+                            }
+                        )
+
+                context = {
+                    "documents": [documents],
+                    "metadatas": [metadatas],
+                }
+
+            elif file.get("id"):
+                file_object = Files.get_file_by_id(file.get("id"))
+                if file_object:
+                    context = {
+                        "documents": [[file_object.data.get("content", "")]],
+                        "metadatas": [
+                            [
+                                {
+                                    "file_id": file.get("id"),
+                                    "name": file_object.filename,
+                                    "source": file_object.filename,
+                                }
+                            ]
+                        ],
+                    }
+            elif file.get("file").get("data"):
+                context = {
+                    "documents": [[file.get("file").get("data", {}).get("content")]],
+                    "metadatas": [
+                        [file.get("file").get("data", {}).get("metadata", {})]
+                    ],
+                }
+        else:
+            # RAG MODE with enhanced error handling
+            collection_names = []
+            if file.get("type") == "collection":
+                if file.get("legacy"):
+                    collection_names = file.get("collection_names", [])
+                else:
+                    collection_names.append(file["id"])
+            elif file.get("collection_name"):
+                collection_names.append(file["collection_name"])
+            elif file.get("id"):
+                if file.get("legacy"):
+                    collection_names.append(f"{file['id']}")
+                else:
+                    collection_names.append(f"file-{file['id']}")
+
+            collection_names = set(collection_names).difference(extracted_collections)
+            if not collection_names:
+                log.debug(f"⚠️ Skipping {file} as it has already been extracted")
+                continue
+
+            log.debug(f"🔍 RAG search for collections: {collection_names}")
+
+            # 🚀 ENHANCED: Check collection existence before querying
+            valid_collections = []
+            for collection_name in collection_names:
+                if VECTOR_DB_CLIENT.has_collection(collection_name):
+                    valid_collections.append(collection_name)
+                    log.debug(f"✅ Collection exists: {collection_name}")
+                else:
+                    log.warning(f"❌ Collection missing: {collection_name}")
+
+            if not valid_collections:
+                log.warning(f"⚠️ No valid collections found for file {file.get('name')}")
+                # 🚀 FALLBACK: Try to get content directly from database
+                if file.get("id"):
+                    log.info("🔄 Fallback: Attempting direct file content retrieval")
+                    try:
+                        file_object = Files.get_file_by_id(file.get("id"))
+                        if file_object and file_object.data.get("content"):
+                            log.info("✅ Fallback successful - using direct content")
+                            context = {
+                                "documents": [[file_object.data.get("content", "")]],
+                                "metadatas": [
+                                    [
+                                        {
+                                            "file_id": file.get("id"),
+                                            "name": file_object.filename,
+                                            "source": file_object.filename,
+                                        }
+                                    ]
+                                ],
+                            }
+                        else:
+                            log.error("❌ Fallback failed - no content available")
+                    except Exception as e:
+                        log.error(f"❌ Fallback exception: {e}")
+                continue
+
+            # Use valid collections only
+            collection_names = valid_collections
+
+            if full_context:
+                try:
+                    log.debug("📖 Using full context retrieval")
+                    context = get_all_items_from_collections(collection_names)
+                except Exception as e:
+                    log.exception(f"❌ Full context retrieval failed: {e}")
+
+            else:
+                try:
+                    context = None
+                    if file.get("type") == "text":
+                        context = file["content"]
+                    else:
+                        if hybrid_search:
+                            try:
+                                log.debug("🔄 Attempting hybrid search")
+                                context = query_collection_with_hybrid_search(
+                                    collection_names=collection_names,
+                                    queries=queries,
+                                    embedding_function=embedding_function,
+                                    k=k,
+                                    reranking_function=reranking_function,
+                                    k_reranker=k_reranker,
+                                    r=r,
+                                )
+                                if context:
+                                    log.debug("✅ Hybrid search successful")
+                            except Exception as e:
+                                log.warning(f"⚠️ Hybrid search failed, falling back: {e}")
+
+                        if (not hybrid_search) or (context is None):
+                            log.debug("🔄 Using standard vector search")
+                            context = query_collection(
+                                collection_names=collection_names,
+                                queries=queries,
+                                embedding_function=embedding_function,
+                                k=k,
+                            )
+                            if context:
+                                log.debug("✅ Standard vector search successful")
+                            else:
+                                log.warning("⚠️ Standard vector search returned no results")
+                except Exception as e:
+                    log.exception(f"❌ RAG search failed completely: {e}")
+
+            extracted_collections.extend(collection_names)
+
+        if context:
+            if "data" in file:
+                del file["data"]
+
+            relevant_contexts.append({**context, "file": file})
+            log.debug(f"✅ Context added for file: {file.get('name')}")
+        else:
+            log.warning(f"❌ No context found for file: {file.get('name')}")
+
+    # Build sources with enhanced validation
+    sources = []
+    for context in relevant_contexts:
+        try:
+            if "documents" in context:
+                if "metadatas" in context:
+                    # 🚀 ENHANCED: Validate document content
+                    documents = context["documents"][0] if context["documents"] else []
+                    if documents:
+                        total_content_length = sum(len(str(doc)) for doc in documents if doc)
+                        log.debug(f"📊 Total content length: {total_content_length} chars")
+                        
+                        if total_content_length < 10:  # Minimum content threshold
+                            log.warning(f"⚠️ Content too short ({total_content_length} chars), skipping")
+                            continue
+
+                    source = {
+                        "source": context["file"],
+                        "document": context["documents"][0],
+                        "metadata": context["metadatas"][0],
+                    }
+                    if "distances" in context and context["distances"]:
+                        source["distances"] = context["distances"][0]
+
+                    sources.append(source)
+                    log.debug("✅ Source added successfully")
+        except Exception as e:
+            log.exception(f"❌ Error processing context: {e}")
+
+    log.info(f"🎯 Enhanced processing complete: {len(sources)} sources extracted from {len(files)} files")
+    return sources
+
+
+# 🔧 BACKWARD COMPATIBILITY: Alias pour API v2 adapter
+# API v2 importe directement get_sources_from_files - on maintient la compatibilité
+get_sources_from_files = get_sources_from_files_original
 
 
 def get_model_path(model: str, update_model: bool = False):

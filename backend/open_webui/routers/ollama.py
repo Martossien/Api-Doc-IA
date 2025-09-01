@@ -708,7 +708,18 @@ async def copy_model(
             try:
                 res = r.json()
                 if "error" in res:
-                    detail = f"Ollama: {res['error']}"
+                    error_msg = res['error']
+                    # 🚨 ENHANCED ERROR DETECTION: Detect CUDA OOM for better user feedback
+                    if "cudaMalloc failed: out of memory" in error_msg or "out of memory" in error_msg.lower():
+                        log.error(f"🚨 CUDA OUT OF MEMORY ERROR detected from Ollama")
+                        log.error(f"   Original error: {error_msg}")
+                        log.error(f"   💡 SOLUTION: Reduce model parameters in web interface:")
+                        log.error(f"      - Lower 'num_gpu' (GPU layers) value")
+                        log.error(f"      - Reduce 'num_ctx' (context length)")
+                        log.error(f"      - Try smaller batch size 'num_batch'")
+                        detail = f"Ollama CUDA OUT OF MEMORY: {error_msg}"
+                    else:
+                        detail = f"Ollama: {error_msg}"
             except Exception:
                 detail = f"Ollama: {e}"
 
@@ -773,7 +784,18 @@ async def delete_model(
             try:
                 res = r.json()
                 if "error" in res:
-                    detail = f"Ollama: {res['error']}"
+                    error_msg = res['error']
+                    # 🚨 ENHANCED ERROR DETECTION: Detect CUDA OOM for better user feedback
+                    if "cudaMalloc failed: out of memory" in error_msg or "out of memory" in error_msg.lower():
+                        log.error(f"🚨 CUDA OUT OF MEMORY ERROR detected from Ollama")
+                        log.error(f"   Original error: {error_msg}")
+                        log.error(f"   💡 SOLUTION: Reduce model parameters in web interface:")
+                        log.error(f"      - Lower 'num_gpu' (GPU layers) value")
+                        log.error(f"      - Reduce 'num_ctx' (context length)")
+                        log.error(f"      - Try smaller batch size 'num_batch'")
+                        detail = f"Ollama CUDA OUT OF MEMORY: {error_msg}"
+                    else:
+                        detail = f"Ollama: {error_msg}"
             except Exception:
                 detail = f"Ollama: {e}"
 
@@ -832,7 +854,18 @@ async def show_model_info(
             try:
                 res = r.json()
                 if "error" in res:
-                    detail = f"Ollama: {res['error']}"
+                    error_msg = res['error']
+                    # 🚨 ENHANCED ERROR DETECTION: Detect CUDA OOM for better user feedback
+                    if "cudaMalloc failed: out of memory" in error_msg or "out of memory" in error_msg.lower():
+                        log.error(f"🚨 CUDA OUT OF MEMORY ERROR detected from Ollama")
+                        log.error(f"   Original error: {error_msg}")
+                        log.error(f"   💡 SOLUTION: Reduce model parameters in web interface:")
+                        log.error(f"      - Lower 'num_gpu' (GPU layers) value")
+                        log.error(f"      - Reduce 'num_ctx' (context length)")
+                        log.error(f"      - Try smaller batch size 'num_batch'")
+                        detail = f"Ollama CUDA OUT OF MEMORY: {error_msg}"
+                    else:
+                        detail = f"Ollama: {error_msg}"
             except Exception:
                 detail = f"Ollama: {e}"
 
@@ -912,7 +945,18 @@ async def embed(
             try:
                 res = r.json()
                 if "error" in res:
-                    detail = f"Ollama: {res['error']}"
+                    error_msg = res['error']
+                    # 🚨 ENHANCED ERROR DETECTION: Detect CUDA OOM for better user feedback
+                    if "cudaMalloc failed: out of memory" in error_msg or "out of memory" in error_msg.lower():
+                        log.error(f"🚨 CUDA OUT OF MEMORY ERROR detected from Ollama")
+                        log.error(f"   Original error: {error_msg}")
+                        log.error(f"   💡 SOLUTION: Reduce model parameters in web interface:")
+                        log.error(f"      - Lower 'num_gpu' (GPU layers) value")
+                        log.error(f"      - Reduce 'num_ctx' (context length)")
+                        log.error(f"      - Try smaller batch size 'num_batch'")
+                        detail = f"Ollama CUDA OUT OF MEMORY: {error_msg}"
+                    else:
+                        detail = f"Ollama: {error_msg}"
             except Exception:
                 detail = f"Ollama: {e}"
 
@@ -991,7 +1035,18 @@ async def embeddings(
             try:
                 res = r.json()
                 if "error" in res:
-                    detail = f"Ollama: {res['error']}"
+                    error_msg = res['error']
+                    # 🚨 ENHANCED ERROR DETECTION: Detect CUDA OOM for better user feedback
+                    if "cudaMalloc failed: out of memory" in error_msg or "out of memory" in error_msg.lower():
+                        log.error(f"🚨 CUDA OUT OF MEMORY ERROR detected from Ollama")
+                        log.error(f"   Original error: {error_msg}")
+                        log.error(f"   💡 SOLUTION: Reduce model parameters in web interface:")
+                        log.error(f"      - Lower 'num_gpu' (GPU layers) value")
+                        log.error(f"      - Reduce 'num_ctx' (context length)")
+                        log.error(f"      - Try smaller batch size 'num_batch'")
+                        detail = f"Ollama CUDA OUT OF MEMORY: {error_msg}"
+                    else:
+                        detail = f"Ollama: {error_msg}"
             except Exception:
                 detail = f"Ollama: {e}"
 

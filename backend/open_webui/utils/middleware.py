@@ -578,8 +578,12 @@ async def chat_completion_files_handler(
     request: Request, body: dict, user: UserModel
 ) -> tuple[dict, dict[str, list]]:
     sources = []
+    # 🔧 FIX CRITIQUE: Initialisation des variables pour éviter UnboundLocalError
+    # Ces variables doivent être définies dans tous les cas d'usage
+    extraction_success = True
+    files = body.get("metadata", {}).get("files", None)
 
-    if files := body.get("metadata", {}).get("files", None):
+    if files:
         queries = []
         try:
             queries_response = await generate_queries(
@@ -612,7 +616,6 @@ async def chat_completion_files_handler(
         if len(queries) == 0:
             queries = [get_last_user_message(body["messages"])]
 
-        extraction_success = True
         try:
             # Offload get_sources_from_files to a separate thread
             loop = asyncio.get_running_loop()

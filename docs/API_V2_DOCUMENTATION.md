@@ -222,6 +222,19 @@ Get the current status and results of a task.
 }
 ```
 
+### File Metadata Persistence
+
+When uploading via `POST /api/v2/process`, the file is stored and the following metadata is persisted in the `files` table under `meta` (JSON):
+
+- `name`: original filename (same as `UploadFileInfo.filename`)
+- `content_type`: file MIME type (e.g., `text/plain`, `application/pdf`)
+- `size`: exact file size in bytes
+
+Notes:
+- These keys align with v1 behavior, which already placed `name/content_type/size` under `meta`.
+- Additional technical attributes are stored under `files.data` (e.g., `original_filename`, `uploaded_via`, `checksum`).
+- Compatibility: `FileMeta` accepts extra keys; clients should tolerate these fields.
+
 ### Models Endpoint
 
 #### `GET /api/v2/models`

@@ -370,20 +370,26 @@ class OpenWebUIAdapter:
             # Upload using existing Storage system
             contents, file_path = Storage.upload_file(file.file, filename)
             
-            # Create file record in database
+            # Create file record in database with safe meta merge
+            proposed_meta = {
+                "name": file.filename,
+                "content_type": file.content_type or "application/octet-stream",
+                "size": file_size,
+            }
+
+            # Build FileForm; FileForm doesn't declare content_type/size fields,
+            # so we persist them under meta (aligned with v1 behavior)
             file_form = FileForm(
                 id=file_id,
                 filename=file.filename,
                 path=file_path,
-                content_type=file.content_type or "application/octet-stream",
-                size=file_size,
-                user_id=user.id,
                 data={
                     "api_v2": True,
                     "uploaded_via": "api_v2",
                     "original_filename": file.filename,
-                    "checksum": file_hash  # Store checksum for deduplication
-                }
+                    "checksum": file_hash,  # Store checksum for deduplication
+                },
+                meta=proposed_meta,
             )
             
             file_item = Files.insert_new_file(user.id, file_form)

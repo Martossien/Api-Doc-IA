@@ -17,7 +17,7 @@ from open_webui.env import (
     DATABASE_POOL_TIMEOUT,
 )
 from peewee_migrate import Router
-from sqlalchemy import Dialect, create_engine, MetaData, types
+from sqlalchemy import Dialect, create_engine, MetaData, types, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import QueuePool, NullPool
@@ -85,8 +85,36 @@ handle_peewee_migration(DATABASE_URL)
 SQLALCHEMY_DATABASE_URL = DATABASE_URL
 if "sqlite" in SQLALCHEMY_DATABASE_URL:
     engine = create_engine(
-        SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+        SQLALCHEMY_DATABASE_URL,
+        connect_args={
+            "check_same_thread": False,
+            # Increase timeout to reduce SQLITE_BUSY errors under contention
+            "timeout": 5,
+        },
+        pool_pre_ping=True,
     )
+
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        """Configure SQLite for better concurrent behavior on fresh installs.
+
+        - journal_mode=WAL: readers don't block writers (and vice versa)
+        - synchronous=NORMAL: balance between durability and speed
+        - busy_timeout=5000ms: wait a bit for locks instead of failing fast
+        """
+        try:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            cursor.execute("PRAGMA synchronous=NORMAL;")
+            cursor.execute("PRAGMA busy_timeout=5000;")
+        except Exception:
+            # Non-fatal: fallback to SQLite defaults if PRAGMA fails
+            pass
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
 else:
     if DATABASE_POOL_SIZE > 0:
         engine = create_engine(

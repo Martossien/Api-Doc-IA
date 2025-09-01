@@ -115,12 +115,26 @@ def upload_file(
         )
         if process:
             try:
-                if file.content_type in [
+                # Determine audio MIME types from admin config if available
+                default_audio_mimes = [
                     "audio/mpeg",
                     "audio/wav",
                     "audio/ogg",
                     "audio/x-m4a",
-                ]:
+                    "audio/webm",
+                ]
+                audio_mimes = default_audio_mimes
+                try:
+                    admin_cfg = getattr(request.app.state.config, "API_V2_ADMIN_CONFIG", None)
+                    if isinstance(admin_cfg, dict):
+                        processing_cfg = admin_cfg.get("processing", {}) if isinstance(admin_cfg.get("processing"), dict) else {}
+                        mime_list = processing_cfg.get("supported_mime_types")
+                        if isinstance(mime_list, list) and mime_list:
+                            audio_mimes = mime_list
+                except Exception:
+                    pass
+
+                if file.content_type in audio_mimes:
                     file_path = Storage.get_file(file_path)
                     result = transcribe(request, file_path)
 

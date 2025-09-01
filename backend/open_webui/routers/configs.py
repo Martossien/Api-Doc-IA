@@ -436,6 +436,12 @@ async def set_api_v2_admin_config(
         # Save the full config
         API_V2_ADMIN_CONFIG.value = form_data.config.dict()
         API_V2_ADMIN_CONFIG.save()
+
+        # Update runtime config for immediate effect
+        try:
+            request.app.state.config.API_V2_ADMIN_CONFIG = form_data.config.dict()
+        except Exception:
+            pass
         
         # Audit log
         log.info(f"API v2 config updated by user {user.id}. Reason: {form_data.reason or 'None'}")

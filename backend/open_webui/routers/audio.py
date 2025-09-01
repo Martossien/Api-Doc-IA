@@ -765,9 +765,20 @@ def transcription(
 ):
     log.info(f"file.content_type: {file.content_type}")
 
-    supported_filetypes = ("audio/mpeg", "audio/wav", "audio/ogg", "audio/x-m4a")
+    # Resolve supported MIME types from admin config if available
+    default_supported = ("audio/mpeg", "audio/wav", "audio/ogg", "audio/x-m4a", "audio/webm")
+    supported_filetypes = default_supported
+    try:
+        admin_cfg = getattr(request.app.state.config, "API_V2_ADMIN_CONFIG", None)
+        if isinstance(admin_cfg, dict):
+            processing_cfg = admin_cfg.get("processing", {}) if isinstance(admin_cfg.get("processing"), dict) else {}
+            mime_list = processing_cfg.get("supported_mime_types")
+            if isinstance(mime_list, list) and mime_list:
+                supported_filetypes = tuple(mime_list)
+    except Exception:
+        pass
 
-    if not file.content_type.startswith(supported_filetypes):
+    if not file.content_type.startswith(tuple(supported_filetypes)):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.FILE_NOT_SUPPORTED,

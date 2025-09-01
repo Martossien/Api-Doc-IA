@@ -391,6 +391,14 @@ logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
 
+# Enable TLS-in-TLS support for aiohttp HTTPS proxy (TLS over TLS via HTTPS proxies)
+try:
+    # Python's asyncio may block nested TLS by default; mark transport as compatible
+    setattr(asyncio.sslproto._SSLProtocolTransport, "_start_tls_compatible", True)
+    logging.getLogger(__name__).info("TLS-in-TLS support enabled for aiohttp proxy")
+except Exception as e:
+    logging.getLogger(__name__).warning(f"Could not enable TLS-in-TLS: {e}")
+
 
 class SPAStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):

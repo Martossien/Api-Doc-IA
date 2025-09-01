@@ -31,6 +31,16 @@ class FileFormat(str, Enum):
     JPEG = "jpeg"
     GIF = "gif"
     WEBP = "webp"
+    # Audio formats
+    MP3 = "mp3"
+    MPEG = "mpeg"
+    WAV = "wav"
+    OGG = "ogg"
+    M4A = "m4a"
+    FLAC = "flac"
+    AAC = "aac"
+    OPUS = "opus"
+    WEBM = "webm"
 
 
 class MemoryManagementConfig(BaseModel):
@@ -192,17 +202,29 @@ class ProcessingConfig(BaseModel):
     )
     
     
-    # === LEGACY PARAMETERS ===
+    # === FILE TYPES / LIMITS ===
     
     supported_formats: List[FileFormat] = Field(
         default=[
             FileFormat.PDF, FileFormat.DOCX, FileFormat.DOC,
             FileFormat.TXT, FileFormat.MD, FileFormat.RTF,
             FileFormat.PNG, FileFormat.JPG, FileFormat.JPEG, FileFormat.GIF,
-            # Audio formats added
-            "MP3", "WAV", "OGG", "M4A", "FLAC", "AAC", "OPUS"
+            # Audio formats
+            FileFormat.MP3, FileFormat.WAV, FileFormat.OGG, FileFormat.M4A,
+            FileFormat.FLAC, FileFormat.AAC, FileFormat.OPUS, FileFormat.WEBM,
         ],
         description="Supported file formats for processing (including audio)"
+    )
+
+    supported_mime_types: List[str] = Field(
+        default=[
+            "audio/mpeg",
+            "audio/wav",
+            "audio/ogg",
+            "audio/x-m4a",
+            "audio/webm",
+        ],
+        description="Supported MIME types for audio uploads"
     )
     
     max_file_size_mb: int = Field(
@@ -477,6 +499,18 @@ def migrate_legacy_config(legacy_config: Dict[str, Any]) -> ApiV2AdminConfig:
     supported_formats = legacy_config.get("supported_formats", [
         "pdf", "docx", "txt", "md", "png", "jpg", "jpeg", "gif"
     ])
+    # Normalize legacy supported_formats to lowercase and filter valid enums
+    normalized_formats = []
+    try:
+        values = [e.value for e in FileFormat]
+        for fmt in supported_formats or []:
+            if isinstance(fmt, str) and fmt.lower() in values:
+                normalized_formats.append(fmt.lower())
+    except Exception:
+        normalized_formats = []
+
+    # Supported MIME types (optional in legacy)
+    supported_mime_types = legacy_config.get("supported_mime_types", None)
     
     # Memory management from legacy
     memory_mgmt = legacy_config.get("memory_management", {})
@@ -488,7 +522,8 @@ def migrate_legacy_config(legacy_config: Dict[str, Any]) -> ApiV2AdminConfig:
             max_tokens=max_tokens
         ),
         processing=ProcessingConfig(
-            supported_formats=[FileFormat(fmt) for fmt in supported_formats if fmt in [e.value for e in FileFormat]]
+            supported_formats=[FileFormat(fmt) for fmt in normalized_formats] or ProcessingConfig().supported_formats,
+            supported_mime_types=supported_mime_types if isinstance(supported_mime_types, list) and supported_mime_types else ProcessingConfig().supported_mime_types,
         ),
         memory_management=MemoryManagementConfig(
             cleanup_after_processing=memory_mgmt.get("cleanup_after_processing", True),
@@ -520,6 +555,7 @@ def export_config_to_legacy(config: ApiV2AdminConfig) -> Dict[str, Any]:
         "vision_mode": config.processing.vision_mode,
         "default_prompt_template": config.templates.default_prompt_template,
         "supported_formats": [fmt.value for fmt in config.processing.supported_formats],
+        "supported_mime_types": list(config.processing.supported_mime_types),
         "memory_management": {
             "cleanup_after_processing": config.memory_management.cleanup_after_processing,
             "monitor_usage": config.memory_management.monitor_usage,

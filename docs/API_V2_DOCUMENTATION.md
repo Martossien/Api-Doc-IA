@@ -235,6 +235,16 @@ Notes:
 - Additional technical attributes are stored under `files.data` (e.g., `original_filename`, `uploaded_via`, `checksum`).
 - Compatibility: `FileMeta` accepts extra keys; clients should tolerate these fields.
 
+### Web Conversations vs API v2 Clients
+
+- API v2 (clients lourds): injecte par défaut le contenu extrait en « full context » (inline), sauf si une limite admin `processing.max_inline_context_chars` est définie (> 0 = troncature, 0/absent = pas de coupe).
+- Web (conversations v1): par défaut utilise le RAG (retrieval top‑k), pas l’injection inline complète. Le mode « plein contexte » côté web n’est activé que si vous forcez explicitement des options v1:
+  - `BYPASS_EMBEDDING_AND_RETRIEVAL = true` (bypass RAG → full inline)
+  - `RAG_FULL_CONTEXT = true` (plein contexte pour le retrieval)
+- Où trouver ces options (WebUI):
+  - Dans l’interface Web, ouvrez les Paramètres/Admin (icône engrenage) puis la section liée au Retrieval/RAG. Selon la version de WebUI, ces bascules apparaissent dans les paramètres d’administration sous « Retrieval » / « Knowledge & Search ».
+  - Remarque: ces drapeaux v1 n’affectent pas l’API v2; la limite `processing.max_inline_context_chars` est spécifique au module v2.
+
 ### Models Endpoint
 
 #### `GET /api/v2/models`

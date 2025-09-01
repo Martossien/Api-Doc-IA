@@ -359,6 +359,13 @@ curl http://localhost:8080/api/v2/health
   - Présence d’un Bearer commençant par `sk-` → client programmatique (client lourd/outil).
   - Présence d’un cookie `token` JWT (ou Bearer non `sk-`) → conversation web/UI.
 
+### Note — Injection de contexte (v2 vs web)
+- API v2 (clients lourds): l’adapter injecte par défaut le contenu extrait en « full context » (inline). Une limite admin optionnelle `processing.max_inline_context_chars` peut tronquer cette injection (> 0 = coupe, 0/absent = pas de coupe).
+- Web (v1): par défaut, le flux utilise le RAG (retrieval top‑k), pas l’injection inline complète. Le « plein contexte » côté web ne s’active que si vous forcez des options v1:
+  - `BYPASS_EMBEDDING_AND_RETRIEVAL = true` (bypass RAG → full inline)
+  - `RAG_FULL_CONTEXT = true` (plein contexte pour le retrieval)
+- Où activer (WebUI): via le menu Paramètres/Admin (icône engrenage), rubrique liée au « Retrieval/RAG » (libellé exact selon version). Ces drapeaux sont propres au mode web v1 et n’affectent pas l’API v2.
+
 ## ANNEXES TECHNIQUES
 
 ### A. Inventaire complet du repository (extrait, répertoires exclus: `.git/`, `node_modules/`, `__pycache__/`, données volumineuses)

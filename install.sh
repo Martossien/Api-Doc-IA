@@ -9,6 +9,104 @@
 
 set -e
 
+# ---------------------------------------------------------------------
+# APT update helper resilient to stale proxy caches / expired InRelease
+# ---------------------------------------------------------------------
+apt_update_with_proxy_fix() {
+    echo -e "${BLUE}🔄 Running apt-get update (proxy-safe)...${NC}"
+
+# ---------------------------------------------------------------------
+# Python headers detection (pyenv/venv aware) + Debian fallback installer
+# ---------------------------------------------------------------------
+python_headers_available() {
+    local hdr
+    hdr="$(python - <<'PY'
+import sysconfig
+p = sysconfig.get_config_h_filename()
+print(p if p else "")
+PY
+)"
+    if [[ -n "$hdr" && -f "$hdr" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Map a package name to Debian fallbacks
+map_debian_pkg_fallbacks() {
+    local name="$1"
+    local py_mm
+    py_mm="$(python - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)"
+    case "$name" in
+        python3.*-dev)
+            echo "python${py_mm}-dev python3-dev python3-all-dev"
+            ;;
+        python*-dev)
+            echo "python${py_mm}-dev python3-dev python3-all-dev"
+            ;;
+#            echo ""
+#            ;;
+    esac
+}
+
+deb_install_or_fallback() {
+    if [[ $# -eq 0 ]]; then return 0; fi
+    # Update once (proxy-safe)
+    apt_update_with_proxy_fix || true
+
+    local pkgs=("$@")
+    local to_install=()
+
+    # If Python headers already available, drop python*-dev requests
+    if python_headers_available; then
+        for p in "${pkgs[@]}"; do
+            if [[ "$p" =~ ^python[0-9.]*-dev$ || "$p" == "python3-dev" || "$p" == "python3-all-dev" ]]; then
+                echo -e "${GREEN}✅ Python headers present (pyenv/venv). Skipping $p.${NC}"
+                continue
+            fi
+            to_install+=("$p")
+        done
+    else
+        to_install=("${pkgs[@]}")
+    fi
+
+    # Install one-by-one with fallbacks to provide clear logs
+    for pkg in "${to_install[@]}"; do
+        if $SUDO_CMD apt-get install -y "$pkg"; then
+            continue
+        fi
+        # Try mapped fallbacks
+        local fallbacks
+        fallbacks="$(map_debian_pkg_fallbacks "$pkg")"
+        for alt in $fallbacks; do
+            echo -e "${YELLOW}↪️  Trying fallback package: ${alt}${NC}"
+            if $SUDO_CMD apt-get install -y "$alt"; then
+                break
+            fi
+        done
+    done
+}
+    local extra_opts=()
+    if [[ -n "${http_proxy}${https_proxy}${HTTP_PROXY}${HTTPS_PROXY}" ]]; then
+        extra_opts+=(-o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true)
+    fi
+    if $SUDO_CMD apt-get "${extra_opts[@]}" update; then
+        return 0
+    fi
+    echo -e "${YELLOW}⚠️ apt-get update failed. Retrying with Valid-Until/Date disabled (proxy stale indexes).${NC}"
+    if $SUDO_CMD apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false "${extra_opts[@]}" update; then
+        return 0
+    fi
+    echo -e "${YELLOW}🧹 Purging APT lists cache and retrying (last attempt)...${NC}"
+    $SUDO_CMD rm -rf /var/lib/apt/lists/* || true
+    $SUDO_CMD apt-get clean || true
+    $SUDO_CMD apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false "${extra_opts[@]}" update
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -541,14 +639,14 @@ install_python311_ubuntu() {
     # Install required packages for adding PPA
     if ! command -v add-apt-repository >/dev/null 2>&1; then
         echo -e "${BLUE}📦 Installing software-properties-common...${NC}"
-        $SUDO_CMD apt update
+        apt_update_with_proxy_fix
         $SUDO_CMD apt install -y software-properties-common
     fi
     
     # Add deadsnakes PPA for Python 3.11
     echo -e "${BLUE}📦 Adding deadsnakes PPA for Python 3.11...${NC}"
     $SUDO_CMD add-apt-repository ppa:deadsnakes/ppa -y
-    $SUDO_CMD apt update
+    apt_update_with_proxy_fix
     
     # Install Python 3.11
     echo -e "${BLUE}📦 Installing Python 3.11...${NC}"
@@ -869,8 +967,8 @@ except:
             
             if [ ${#ESSENTIAL_DEPS[@]} -gt 0 ]; then
                 echo -e "${BLUE}📦 Installing essential tools: ${ESSENTIAL_DEPS[*]}${NC}"
-                $SUDO_CMD apt update
-                $SUDO_CMD apt install -y "${ESSENTIAL_DEPS[@]}"
+                apt_update_with_proxy_fix
+                deb_install_or_fallback "${ESSENTIAL_DEPS[@]}"
             fi
             
             # Check Python version and install 3.11 if needed on Ubuntu
@@ -918,8 +1016,8 @@ except:
                 read -p "Install missing dependencies? (Y/n): " -r
                 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
                     echo -e "${BLUE}⚙️ Installing dependencies...${NC}"
-                    $SUDO_CMD apt update
-                    $SUDO_CMD apt install -y "${DEPS_NEEDED[@]}"
+                    apt_update_with_proxy_fix
+                    deb_install_or_fallback "${DEPS_NEEDED[@]}"
                     echo -e "${GREEN}✅ Dependencies installed${NC}"
                 else
                     echo -e "${YELLOW}⚠️ Skipping system dependencies${NC}"

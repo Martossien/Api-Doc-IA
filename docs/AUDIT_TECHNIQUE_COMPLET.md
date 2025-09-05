@@ -1567,3 +1567,62 @@ CREATE TABLE IF NOT EXISTS metriques_performance (
 
 - Diff fonctionnel global:
   - Ajout d’une API v2 orientée document + persistance des tâches + orchestration RAG intégrée; séparation UI/API; administration et observabilité renforcées.
+
+## Addendum 2025-09-05 — Durcissement RAG, Preuves Payload, Fallbacks
+
+Ce complément met à jour l’audit avec les changements récents implémentés dans ce dépôt. Tous les chemins cités existent dans le code et les fonctions/effets décrits sont vérifiables dans les logs.
+
+- backend/open_webui/utils/middleware.py (modifié):
+  - Correctif critique d’indentation dans `process_chat_payload`: l’injection du contexte et les preuves payload s’exécutent désormais systématiquement quand `sources` > 0 (et non plus seulement en cas d’exception).
+  - Ajouts instrumentation:
+    - `🧾 payload_head/tail`: affiche `context_chars`, `context_head`, `context_tail`, `messages_chars`, `messages_head`, `messages_tail` (preuve de ce qui est réellement injecté et envoyé aux LLMs).
+    - `🧾 final_context_integrity ok=…`: contrôle que `<source>` (et le `<context>`) est bien présent dans le message final (post‑template) et indique les tailles.
+    - `🧾 model_window_detected …` et `🧾 token_budget_estimate …`: détection fiable de la fenêtre (DB, ENV, fallback) et estimation du budget tokens (approx chars/4). Ces entrées étaient déjà présentes et restent valables.
+  - Injection Ollama (workaround 2.0+):
+    - Feature flag `ENABLE_OLLAMA_USER_REPLACE` (1 par défaut): remplace le dernier message user par le template RAG + contexte (sinon prepend; logs: `🧾 ollama_prompt_mode=…`).
+
+- backend/open_webui/routers/ollama.py (modifié):
+  - Avant l’envoi à Ollama (chat):
+    - `🧾 token_budget_to_ollama …`: approx_tokens vs `num_ctx` option (ou ENV/fallback) avec `would_truncate_by_ollama`.
+    - `🧾 ollama_payload_audit …`: `options` (incl. `num_ctx`, `num_predict`), `messages_count`, `last_message_chars`, `last_head`, `last_tail`.
+  - Utilité: prouver ce que le serveur Ollama reçoit effectivement, options comprises.
+
+- scripts/ollama_tee_proxy.py (NOUVEAU):
+  - Proxy HTTP ‘tee’ (127.0.0.1:11435 → 127.0.0.1:11434) capturant le JSON exact envoyé à Ollama.
+  - Sauvegarde `out/ollama_proxy/req-*.json` (requête) + `.meta.json` (sha256, bytes, head/tail).
+  - Preuve réseau indépendante des logs applicatifs.
+
+- backend/open_webui/retrieval/utils.py (modifié):
+  - Audits de couverture RAG à chaque requête:
+    - `🧾 RAG audit: retrieval_stats chunks_included=…, total_chunks_collections=…, top_k=…, avg_score=…, min_score=…, head_sidx=[…], tail_sidx=[…]`
+    - Permet d’identifier rapidement une couverture trop faible (index FTS bancal, mauvais `TOP_K`, etc.).
+  - Fallback ‘small coverage’ (sécurisant):
+    - Si `total_chunks_collections ≥ RAG_LARGE_COLLECTION_MIN_CHUNKS` (def 50) et `chunks_included < RAG_MIN_CHUNKS_FALLBACK` (def 5), bascule en `full_context` automatiquement.
+    - Log explicite: `🔁 RAG fallback_small_coverage applied … switched to full_context …`.
+    - Paramétrable via ENV: `RAG_MIN_CHUNKS_FALLBACK`, `RAG_LARGE_COLLECTION_MIN_CHUNKS`.
+
+- backend/open_webui/retrieval/vector/dbs/chroma.py (modifié):
+  - Reset Chroma (SQLite/FTS):
+    - Si `client.reset()` échoue avec `sqlite3.OperationalError: vtable constructor failed: embedding_fulltext_search` (cas FTS5/vtable), fallback local:
+      - Suppression du dossier persistant `CHROMA_DATA_PATH` (backend/open_webui/data/vector_db) + recréation d’un `PersistentClient` propre.
+      - Logs attendus: `Chroma reset() failed: …`, `Falling back to deleting persistent Chroma path: …`, `Chroma persistent store reset via filesystem cleanup completed`.
+    - Objectif: éviter les crashs “Réinitialiser le stockage vectoriel/connaissances” et permettre un reindex immédiat.
+
+- cleanup_vector_db.py (modifié):
+  - Tolérant à l’absence de `chroma.sqlite3`: au lieu d’erreur, passe en mode “sans base vectorielle” (warnings) et poursuit le nettoyage uploads/WebUI DB.
+  - Optimisations Chroma (VACUUM/ANALYZE) sautées quand la base n’existe pas.
+
+### Conséquences et bonnes pratiques
+- Preuves E2E: entre `payload_head/tail`, `final_context_integrity`, `ollama_payload_audit` et le proxy tee, il n’y a plus d’ambiguïté sur ce qui est réellement envoyé au LLM.
+- FTS corrompu ≠ “roman court”: le fallback small‑coverage et le reset Chroma filesystem rendent visibles et contournables ces scénarios (les logs montrent clairement la décision).
+- Pour documents longs: envisager `ENABLE_RAG_HYBRID_SEARCH` + TOP_K élevés et/ou orchestration multi‑passes (voir `docs/TECH_PLAN_RAG_NEXT_STEPS_*.md`).
+
+### Références log (exemples)
+- `🧾 payload_head/tail: context_chars=… context_head=… context_tail=… messages_chars=… …`
+- `🧾 final_context_integrity ok=True, context_chars=…, messages_chars=…`
+- `🧾 model_window_detected tokens=…, source=…`
+- `🧾 token_budget_to_ollama approx_tokens=…, num_ctx_option=…, would_truncate_by_ollama=…`
+- `🧾 ollama_payload_audit: options={…}, messages_count=…, last_message_chars=…, last_head=…, last_tail=…`
+- `🧾 RAG audit: retrieval_stats chunks_included=…, total_chunks_collections=…, top_k=…, avg_score=…, min_score=…, head_sidx=[…], tail_sidx=[…]`
+- `🔁 RAG fallback_small_coverage applied: included=… < … while total_chunks=… ≥ …; switched to full_context …`
+- `Chroma reset() failed: …` → `Falling back to deleting persistent Chroma path: …` → `Chroma persistent store reset via filesystem cleanup completed`

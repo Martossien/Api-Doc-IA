@@ -859,7 +859,46 @@ def save_docs_to_vector_db(
         else:
             raise ValueError(ERROR_MESSAGES.DEFAULT("Invalid text splitter"))
 
+        # Audit chunking parameters before split
+        try:
+            log.info(
+                f"🧾 Ingest audit: splitter={request.app.state.config.TEXT_SPLITTER or 'character'}, chunk_size={request.app.state.config.CHUNK_SIZE}, chunk_overlap={request.app.state.config.CHUNK_OVERLAP}, add_start_index=True"
+            )
+        except Exception:
+            pass
+
         docs = text_splitter.split_documents(docs)
+        # After split, audit start_index quality
+        try:
+            total = len(docs)
+            with_sidx = 0
+            missing_sidx = 0
+            sidx_values = []
+            for d in docs:
+                m = getattr(d, 'metadata', {}) or {}
+                s = m.get('start_index') or m.get('startIndex')
+                if s is None:
+                    missing_sidx += 1
+                else:
+                    with_sidx += 1
+                    try:
+                        sidx_values.append(int(s))
+                    except Exception:
+                        sidx_values.append(s)
+            # duplicates count
+            try:
+                vals = [v for v in sidx_values if v is not None]
+                unique = len(set(vals))
+                dups = max(0, len(vals) - unique)
+            except Exception:
+                dups = 0
+            # sample
+            sample = (sidx_values[:12] + ['...'] + sidx_values[-12:]) if len(sidx_values) > 30 else sidx_values
+            log.info(
+                f"🧾 Ingest audit: split_chunks={total}, with_start_index={with_sidx}, start_index_missing={missing_sidx}, start_index_duplicates={dups}, start_index_sample={sample}"
+            )
+        except Exception:
+            pass
 
     if len(docs) == 0:
         raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
@@ -1072,9 +1111,16 @@ def process_file(
             text_content = " ".join([doc.page_content for doc in docs])
 
         log.debug(f"text_content: {text_content}")
+        # Store extracted content and checksum (sha256) for deterministic dedup/oracle
+        try:
+            from open_webui.utils.misc import calculate_sha256_string
+            checksum = calculate_sha256_string(text_content)
+        except Exception:
+            checksum = None
+
         Files.update_file_data_by_id(
             file.id,
-            {"content": text_content},
+            {"content": text_content, **({"checksum": checksum} if checksum else {})},
         )
 
         hash = calculate_sha256_string(text_content)

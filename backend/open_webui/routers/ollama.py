@@ -160,6 +160,35 @@ async def send_post_request(
             )
         else:
             res = await r.json()
+            # Response audit (non-streaming): try to extract assistant content
+            try:
+                content = None
+                # Ollama chat JSON usually includes 'message': {'content': ...}
+                if isinstance(res, dict):
+                    msg = res.get("message") or {}
+                    content = msg.get("content") or res.get("response")
+                if isinstance(content, str):
+                    import re as _re, json as _json
+                    pat = _re.compile(r"(DEBUT_[A-Z0-9_]+|MARK_[A-Z0-9_]+|FIN_[A-Z0-9_]+)")
+                    markers = [m.group(0) for m in pat.finditer(content)]
+                    mm = _re.compile(r"MARK_(\\d+)_OCTETS?_([0-9]{3})")
+                    bytes_vals = []
+                    for m in markers:
+                        g = mm.match(m)
+                        if g:
+                            try:
+                                bytes_vals.append(int(g.group(1)))
+                            except Exception:
+                                pass
+                    from collections import Counter as _Counter
+                    c = _Counter(bytes_vals)
+                    dups = sorted([v for v, n in c.items() if n > 1])
+                    sample_resp = (content[:400] + "…") if len(content) > 400 else content
+                    log.info(
+                        f"🧾 LLM response audit: url={url}, streaming=False, markers_in_response={len(markers)}, unique_bytes_count={len(set(bytes_vals))}, duplicate_bytes={dups}, response_sample={_json.dumps(sample_resp, ensure_ascii=False)}"
+                    )
+            except Exception:
+                pass
             await cleanup_response(r, session)
             return res
 
@@ -1234,6 +1263,37 @@ async def generate_chat_completion(
     if prefix_id:
         payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
     # payload["keep_alive"] = -1 # keep alive forever
+    # 🧾 Audit: summarize payload size and options before sending to Ollama
+    try:
+        import json as _json
+        _msgs = payload.get("messages", []) or []
+        _last = _msgs[-1] if _msgs else {}
+        _last_content = _last.get("content") if isinstance(_last, dict) else None
+        _last_chars = len(_last_content) if isinstance(_last_content, str) else 0
+        _head = _last_content[:200] if isinstance(_last_content, str) else ""
+        _tail = _last_content[-200:] if isinstance(_last_content, str) and _last_chars > 200 else ( _last_content or "")
+        _opts = payload.get("options", {}) or {}
+        # Token budget estimate against Ollama-side num_ctx if present
+        try:
+            approx_tokens = int((_last_chars or 0) / 4)
+            server_ctx = None
+            if isinstance(_opts, dict) and _opts.get("num_ctx"):
+                server_ctx = int(_opts.get("num_ctx"))
+            else:
+                # fallback to env or conservative default
+                import os as _os
+                env_ctx = _os.getenv('MODEL_WINDOW_TOKENS') or _os.getenv('MODEL_CONTEXT_TOKENS')
+                server_ctx = int(env_ctx) if env_ctx else 8192
+            would_truncate = approx_tokens > server_ctx
+            log.info(f"🧾 token_budget_to_ollama approx_tokens={approx_tokens}, num_ctx_option={server_ctx}, would_truncate_by_ollama={would_truncate}")
+        except Exception:
+            pass
+        log.info(
+            f"🧾 ollama_payload_audit: options={_json.dumps(_opts)}, messages_count={len(_msgs)}, last_message_chars={_last_chars}, last_head={_json.dumps(_head, ensure_ascii=False)}, last_tail={_json.dumps(_tail, ensure_ascii=False)}"
+        )
+    except Exception:
+        pass
+
     return await send_post_request(
         url=f"{url}/api/chat",
         payload=json.dumps(payload),

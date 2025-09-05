@@ -188,4 +188,36 @@ class ChromaClient:
 
     def reset(self):
         # Resets the database. This will delete all collections and item entries.
-        return self.client.reset()
+        try:
+            return self.client.reset()
+        except Exception as e:
+            # Some SQLite builds (FTS5/vtable) can fail to DROP virtual tables during reset.
+            # Provide a safe fallback for local persistent mode by deleting the on-disk store.
+            log.exception(f"Chroma reset() failed: {e}")
+            try:
+                if CHROMA_HTTP_HOST == "":
+                    import shutil, os
+                    log.warning(
+                        f"Falling back to deleting persistent Chroma path: {CHROMA_DATA_PATH}"
+                    )
+                    try:
+                        shutil.rmtree(CHROMA_DATA_PATH, ignore_errors=True)
+                    finally:
+                        os.makedirs(CHROMA_DATA_PATH, exist_ok=True)
+
+                    # Recreate a fresh PersistentClient with the same settings
+                    self.client = chromadb.PersistentClient(
+                        path=CHROMA_DATA_PATH,
+                        settings=Settings(
+                            allow_reset=True,
+                            anonymized_telemetry=False,
+                        ),
+                        tenant=CHROMA_TENANT,
+                        database=CHROMA_DATABASE,
+                    )
+                    log.info("Chroma persistent store reset via filesystem cleanup completed")
+                    return True
+            except Exception as e2:
+                log.exception(f"Chroma persistent fallback reset failed: {e2}")
+            # If HTTP mode or fallback failed, bubble up
+            raise

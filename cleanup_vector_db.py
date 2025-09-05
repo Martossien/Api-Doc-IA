@@ -58,12 +58,15 @@ class ChromaDBCleaner:
     def get_database_connection(self):
         """Connexion sécurisée à ChromaDB"""
         try:
+            if not VECTOR_DB_DIR.exists() or not CHROMA_DB.exists():
+                log.warning(f"⚠️ ChromaDB introuvable: {CHROMA_DB} — passage en mode sans base vectorielle (aucune suppression côté DB)")
+                return None
             conn = sqlite3.connect(CHROMA_DB, timeout=10.0)
             conn.row_factory = sqlite3.Row
             return conn
         except Exception as e:
             log.error(f"Erreur connexion ChromaDB: {e}")
-            raise
+            return None
 
     def get_collections_to_cleanup(self, cutoff_time):
         """Identifie les collections à supprimer basé sur l'âge"""
@@ -189,7 +192,11 @@ class ChromaDBCleaner:
             return True
             
         try:
-            with self.get_database_connection() as conn:
+            conn = self.get_database_connection()
+            if conn is None:
+                log.info("ℹ️ Skip suppression ChromaDB — base vectorielle absente")
+                return True
+            with conn:
                 cursor = conn.cursor()
                 
                 # Supprimer les embeddings associés
@@ -432,9 +439,13 @@ class ChromaDBCleaner:
             log.info("🔧 Optimisation des bases de données...")
             
             # Optimiser ChromaDB
-            with self.get_database_connection() as conn:
-                conn.execute("VACUUM")
-                conn.execute("ANALYZE")
+            conn = self.get_database_connection()
+            if conn is not None:
+                with conn:
+                    conn.execute("VACUUM")
+                    conn.execute("ANALYZE")
+            else:
+                log.info("ℹ️ Skip optimisation ChromaDB — base vectorielle absente")
                 
             # Optimiser WebUI DB
             with self.get_webui_database_connection() as conn:
@@ -487,10 +498,9 @@ def main():
     if args.retention_days:
         retention_hours = args.retention_days * 24
     
-    # Vérifications préliminaires
+    # Vérifications préliminaires (tolérantes)
     if not CHROMA_DB.exists():
-        log.error(f"❌ ChromaDB introuvable: {CHROMA_DB}")
-        sys.exit(1)
+        log.warning(f"⚠️ ChromaDB introuvable: {CHROMA_DB} — poursuite en mode sans base vectorielle (aucune opération DB)")
         
     uploads_found = False
     for uploads_dir in UPLOADS_DIRS:
@@ -499,8 +509,7 @@ def main():
             break
     
     if not uploads_found:
-        log.error(f"❌ Aucun dossier uploads trouvé: {UPLOADS_DIRS}")
-        sys.exit(1)
+        log.warning(f"⚠️ Aucun dossier uploads trouvé: {UPLOADS_DIRS} — rien à nettoyer côté fichiers")
     
     # Lancer le nettoyage
     cleaner = ChromaDBCleaner(dry_run=args.dry_run)

@@ -679,6 +679,25 @@ async def generate_chat_completion(
     if "max_tokens" in payload and "max_completion_tokens" in payload:
         del payload["max_tokens"]
 
+    # Prompt audit: log prompt sample and stream flag before sending
+    try:
+        msgs = payload.get("messages", []) or []
+        last_user = None
+        for m in reversed(msgs):
+            if isinstance(m, dict) and m.get("role") == "user":
+                c = m.get("content")
+                if isinstance(c, str):
+                    last_user = c
+                    break
+        sample = None
+        if isinstance(last_user, str):
+            sample = (last_user[:400] + "…") if len(last_user) > 400 else last_user
+        log.info(
+            f"🧾 Prompt audit: model={model_id}, stream={payload.get('stream', False)}, last_user_chars={len(last_user) if isinstance(last_user, str) else 0}, last_user_sample={json.dumps(sample, ensure_ascii=False) if sample is not None else None}"
+        )
+    except Exception:
+        pass
+
     # Convert the modified body back to JSON
     if "logit_bias" in payload:
         payload["logit_bias"] = json.loads(
@@ -817,8 +836,38 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
                 ),
             )
         else:
-            response_data = await r.json()
-            return response_data
+                response_data = await r.json()
+                # Response audit (non-streaming): sample assistant content and marker stats
+                try:
+                    content = None
+                    if isinstance(response_data, dict):
+                        choices = response_data.get("choices") or []
+                        if choices and isinstance(choices[0], dict):
+                            msg = choices[0].get("message") or {}
+                            content = msg.get("content")
+                    if isinstance(content, str):
+                        import re as _re
+                        pat = _re.compile(r"(DEBUT_[A-Z0-9_]+|MARK_[A-Z0-9_]+|FIN_[A-Z0-9_]+)")
+                        markers = [m.group(0) for m in pat.finditer(content)]
+                        mm = _re.compile(r"MARK_(\\d+)_OCTETS?_([0-9]{3})")
+                        bytes_vals = []
+                        for m in markers:
+                            g = mm.match(m)
+                            if g:
+                                try:
+                                    bytes_vals.append(int(g.group(1)))
+                                except Exception:
+                                    pass
+                        from collections import Counter as _Counter
+                        c = _Counter(bytes_vals)
+                        dups = sorted([v for v, n in c.items() if n > 1])
+                        sample_resp = (content[:400] + "…") if len(content) > 400 else content
+                        log.info(
+                            f"🧾 LLM response audit: model={model_id}, streaming=False, markers_in_response={len(markers)}, unique_bytes_count={len(set(bytes_vals))}, duplicate_bytes={dups}, response_sample={json.dumps(sample_resp, ensure_ascii=False)}"
+                        )
+                except Exception:
+                    pass
+                return response_data
 
     except Exception as e:
         log.exception(e)

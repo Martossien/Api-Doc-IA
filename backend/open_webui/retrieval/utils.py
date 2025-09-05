@@ -627,6 +627,58 @@ def get_sources_from_files_original(
                                 embedding_function=embedding_function,
                                 k=k,
                             )
+                    # 🔍 RAG retrieval stats + small-coverage fallback
+                    try:
+                        import os as _os
+                        from statistics import mean as _mean
+                        docs = (context or {}).get("documents", [[]])[0]
+                        metas = (context or {}).get("metadatas", [[]])[0]
+                        dists = (context or {}).get("distances", [[]])[0]
+                        chunks_included = len(docs) if isinstance(docs, list) else 0
+                        avg_score = float(_mean(dists)) if isinstance(dists, list) and dists else 0.0
+                        min_score = float(min(dists)) if isinstance(dists, list) and dists else 0.0
+                        # total chunks in collections (if available)
+                        total_chunks = 0
+                        try:
+                            for cn in collection_names:
+                                gr = get_doc(collection_name=cn)
+                                if gr is not None:
+                                    total_chunks += len(gr.documents[0])
+                        except Exception:
+                            pass
+                        # head/tail offsets (start_index) sample
+                        sidx_order = []
+                        if isinstance(metas, list):
+                            for m in metas:
+                                if isinstance(m, dict):
+                                    v = m.get('start_index') or m.get('startIndex')
+                                    try:
+                                        sidx_order.append(int(v))
+                                    except Exception:
+                                        sidx_order.append(v)
+                        head = sidx_order[:10]
+                        tail = sidx_order[-10:]
+                        log.info(
+                            f"🧾 RAG audit: retrieval_stats chunks_included={chunks_included}, total_chunks_collections={total_chunks}, top_k={k}, avg_score={avg_score:.4f}, min_score={min_score:.4f}, head_sidx={head}, tail_sidx={tail}"
+                        )
+                        # Fallback if suspiciously low coverage on a large collection
+                        try:
+                            min_chunks = int(_os.getenv('RAG_MIN_CHUNKS_FALLBACK', '5'))
+                            large_threshold = int(_os.getenv('RAG_LARGE_COLLECTION_MIN_CHUNKS', '50'))
+                        except Exception:
+                            min_chunks, large_threshold = 5, 50
+                        if total_chunks >= large_threshold and chunks_included < min_chunks:
+                            try:
+                                fc = get_all_items_from_collections(collection_names)
+                                if fc and (fc.get('documents', [[]])[0]):
+                                    context = fc
+                                    log.warning(
+                                        f"🔁 RAG fallback_small_coverage applied: included={chunks_included} < {min_chunks} while total_chunks={total_chunks} >= {large_threshold}; switched to full_context for {list(collection_names)}"
+                                    )
+                            except Exception as _e:
+                                log.exception(_e)
+                    except Exception:
+                        pass
                 except Exception as e:
                     log.exception(e)
 
@@ -639,6 +691,180 @@ def get_sources_from_files_original(
             relevant_contexts.append({**context, "file": file})
 
     sources = []
+
+    def _sort_and_dedupe_source(src: dict) -> dict:
+        """Post-tri déterministe et dé-duplication pour préserver l'ordre d'apparition.
+        Trie par (page/page_number/pageIndex, start_index/startIndex) puis index.
+        Dé-duplique par (file_id, start_index) puis par hash du texte.
+        """
+        documents = list(src.get("document", []) or [])
+        metadatas = list(src.get("metadata", []) or [])
+        distances = list(src.get("distances", []) or [])
+        if not documents or not metadatas:
+            return src
+
+        # Lightweight offset repair if start_index is missing or duplicated
+        # Use Files.data.content to locate chunk text near the expected hint
+        try:
+            file_id = None
+            for m in metadatas:
+                if isinstance(m, dict) and m.get("file_id"):
+                    file_id = m.get("file_id")
+                    break
+            full_text = None
+            if file_id:
+                fo = Files.get_file_by_id(file_id)
+                if fo:
+                    full_text = (fo.data or {}).get("content") or None
+            repaired = 0
+            repair_attempted = 0
+            repair_ambiguous = 0
+            window = 2048  # bounded search window
+            if isinstance(full_text, str) and full_text:
+                # Prepare naive pass to fill missing start_index based on neighbor hints
+                for i, (doc, meta) in enumerate(zip(documents, metadatas)):
+                    if not isinstance(meta, dict):
+                        continue
+                    s = meta.get("start_index") or meta.get("startIndex")
+                    if s is None and isinstance(doc, str) and doc.strip():
+                        repair_attempted += 1
+                        # hint from previous known start_index
+                        hint = None
+                        # try to scope by same page when available
+                        page_curr = meta.get("page") or meta.get("page_number") or meta.get("pageIndex")
+                        # previous
+                        for j in range(i - 1, -1, -1):
+                            mj = metadatas[j] if isinstance(metadatas[j], dict) else {}
+                            sj = mj.get("start_index") or mj.get("startIndex")
+                            pj = mj.get("page") or mj.get("page_number") or mj.get("pageIndex")
+                            if sj is not None and isinstance(documents[j], str):
+                                try:
+                                    if page_curr is None or pj == page_curr:
+                                        hint = int(sj) + len(str(documents[j]))
+                                        break
+                                except Exception:
+                                    pass
+                        # search around hint if available, else global find (bounded cost)
+                        if hint is not None:
+                            start = max(0, hint - window)
+                            pos = -1
+                            for pref_len in (256, 128):
+                                prefix = doc[:pref_len]
+                                if not prefix:
+                                    continue
+                                pos = full_text.find(prefix, start)
+                                if pos != -1:
+                                    # ambiguity check: any other match nearby?
+                                    pos2 = full_text.find(prefix, pos + 1)
+                                    if pos2 != -1 and pos2 < start + window * 2:
+                                        repair_ambiguous += 1
+                                        pos = -1
+                                        continue
+                                    meta["start_index"] = pos
+                                    repaired += 1
+                                    break
+                        else:
+                            pos = -1
+                            for pref_len in (256, 128):
+                                prefix = doc[:pref_len]
+                                if not prefix:
+                                    continue
+                                pos = full_text.find(prefix)
+                                if pos != -1:
+                                    pos2 = full_text.find(prefix, pos + 1)
+                                    if pos2 == -1:
+                                        meta["start_index"] = pos
+                                        repaired += 1
+                                        break
+                                    else:
+                                        repair_ambiguous += 1
+                                        pos = -1
+            # log attempted and ambiguous repairs
+            if repair_attempted or repaired or repair_ambiguous:
+                log.info(f"🧾 RAG audit: offset_repair attempted={repair_attempted}, repaired={repaired}, ambiguous={repair_ambiguous}")
+        except Exception:
+            pass
+        tuples = []
+        for i, (doc, meta) in enumerate(zip(documents, metadatas)):
+            page = None
+            start_idx = None
+            fid = None
+            chunk_seq = None
+            if isinstance(meta, dict):
+                page = meta.get("page") or meta.get("page_number") or meta.get("pageIndex")
+                start_idx = meta.get("start_index") or meta.get("startIndex")
+                fid = meta.get("file_id") or meta.get("fileId") or meta.get("fileID")
+                # try common sequence fields; fallback to provided index
+                chunk_seq = meta.get("chunk_seq") or meta.get("seq") or meta.get("index") or meta.get("chunkIndex")
+            try:
+                page_val = int(page) if page is not None and str(page).isdigit() else 0
+            except Exception:
+                page_val = 0
+            try:
+                sidx_val = int(start_idx) if start_idx is not None and str(start_idx).isdigit() else i
+            except Exception:
+                sidx_val = i
+            try:
+                seq_val = int(chunk_seq) if chunk_seq is not None and str(chunk_seq).isdigit() else i
+            except Exception:
+                seq_val = i
+            fid_key = str(fid) if fid is not None else ""
+            dist = distances[i] if i < len(distances) else None
+            # Deterministic sort key: by file, page, start_index, then stable tie-breakers
+            tuples.append(((fid_key, page_val, sidx_val, seq_val, i), doc, meta, dist))
+
+        tuples.sort(key=lambda t: t[0])
+
+        from collections import deque
+        seen_keys = set()
+        seen_hash = set()
+        hash_order = deque()
+        HASH_LRU_MAX = 10000
+        removed_by_offset = 0
+        removed_by_hash = 0
+        ordered_docs, ordered_metas, ordered_dists = [], [], []
+        import hashlib as _hl
+        for _, doc, meta, dist in tuples:
+            key = None
+            if isinstance(meta, dict):
+                fid = meta.get("file_id")
+                sidx = meta.get("start_index") or meta.get("startIndex")
+                if fid is not None and sidx is not None:
+                    key = (fid, sidx)
+            h = _hl.md5(str(doc).encode("utf-8", errors="ignore")).hexdigest()
+            if key and key in seen_keys:
+                removed_by_offset += 1
+                continue
+            if h in seen_hash:
+                removed_by_hash += 1
+                continue
+            if key:
+                seen_keys.add(key)
+            seen_hash.add(h)
+            hash_order.append(h)
+            if len(hash_order) > HASH_LRU_MAX:
+                old = hash_order.popleft()
+                # safe discard
+                try:
+                    seen_hash.remove(old)
+                except KeyError:
+                    pass
+            ordered_docs.append(doc)
+            ordered_metas.append(meta)
+            if distances:
+                ordered_dists.append(dist)
+
+        # Merge all ordered docs into a single context string to avoid splitting markers across chunk boundaries
+        merged = "\n".join(str(d) for d in ordered_docs)
+        new_src = {
+            **{k: v for k, v in src.items() if k not in ("document", "metadata", "distances")},
+            "document": [merged],
+            "metadata": [ordered_metas[0] if ordered_metas else {}],
+        }
+        if distances:
+            new_src["distances"] = ordered_dists
+        return new_src
+
     for context in relevant_contexts:
         try:
             if "documents" in context:
@@ -651,7 +877,7 @@ def get_sources_from_files_original(
                     if "distances" in context and context["distances"]:
                         source["distances"] = context["distances"][0]
 
-                    sources.append(source)
+                    sources.append(_sort_and_dedupe_source(source))
         except Exception as e:
             log.exception(e)
 
@@ -683,6 +909,26 @@ def get_sources_from_files_enhanced(
         f"🔍 Enhanced files: {files} {queries} {embedding_function} {reranking_function} {full_context}"
     )
     log.info(f"🌐 Processing {len(files) if files else 0} files for web interface")
+    # RAG audit: summarize files being processed (id, name, type, checksum if present)
+    try:
+        _files_info = []
+        for _f in (files or []):
+            _info = {
+                "id": _f.get("id"),
+                "name": _f.get("name"),
+                "type": _f.get("type"),
+            }
+            try:
+                _meta = (_f.get("file", {}) or {}).get("data", {}).get("metadata", {})
+                if isinstance(_meta, dict) and _meta.get("checksum"):
+                    _info["checksum"] = _meta.get("checksum")
+            except Exception:
+                pass
+            _files_info.append(_info)
+        import json as _json
+        log.info(f"🧾 RAG audit: files={_json.dumps(_files_info, ensure_ascii=False)[:1000]}")
+    except Exception:
+        pass
 
     extracted_collections = []
     relevant_contexts = []
@@ -822,6 +1068,11 @@ def get_sources_from_files_enhanced(
                 try:
                     log.debug("📖 Using full context retrieval")
                     context = get_all_items_from_collections(collection_names)
+                    try:
+                        total_chunks = len(context.get('ids', [[]])[0]) if context and context.get('ids') else 0
+                        log.info(f"🧾 RAG audit: full_context total_chunks={total_chunks}")
+                    except Exception:
+                        pass
                 except Exception as e:
                     log.exception(f"❌ Full context retrieval failed: {e}")
 
@@ -860,6 +1111,11 @@ def get_sources_from_files_enhanced(
                                 log.debug("✅ Standard vector search successful")
                             else:
                                 log.warning("⚠️ Standard vector search returned no results")
+                        try:
+                            n_before = len(context.get('documents',[[]])[0]) if context else 0
+                            log.info(f"🧾 RAG audit: retrieval_k={k}, returned_chunks={n_before}")
+                        except Exception:
+                            pass
                 except Exception as e:
                     log.exception(f"❌ RAG search failed completely: {e}")
 
@@ -876,6 +1132,258 @@ def get_sources_from_files_enhanced(
 
     # Build sources with enhanced validation
     sources = []
+
+    def _sort_and_dedupe_source(src: dict) -> dict:
+        """Post-tri déterministe et dé-duplication pour préserver l'ordre d'apparition.
+        Trie par (page/page_number/pageIndex, start_index/startIndex) puis index.
+        Dé-duplique par (file_id, start_index) puis par hash du texte.
+        """
+        documents = list(src.get("document", []) or [])
+        metadatas = list(src.get("metadata", []) or [])
+        distances = list(src.get("distances", []) or [])
+        if not documents or not metadatas:
+            return src
+        tuples = []
+        for i, (doc, meta) in enumerate(zip(documents, metadatas)):
+            page = None
+            start_idx = None
+            if isinstance(meta, dict):
+                page = meta.get("page") or meta.get("page_number") or meta.get("pageIndex")
+                start_idx = meta.get("start_index") or meta.get("startIndex")
+            # fallback to stable index if missing
+            try:
+                page_val = int(page) if page is not None and str(page).isdigit() else 0
+            except Exception:
+                page_val = 0
+            try:
+                sidx_val = int(start_idx) if start_idx is not None and str(start_idx).isdigit() else i
+            except Exception:
+                sidx_val = i
+            dist = distances[i] if i < len(distances) else None
+            tuples.append(((page_val, sidx_val, i), doc, meta, dist))
+
+        tuples.sort(key=lambda t: t[0])
+
+        seen_keys = set()
+        seen_hash = set()
+        ordered_docs, ordered_metas, ordered_dists = [], [], []
+        import hashlib as _hl
+        for _, doc, meta, dist in tuples:
+            key = None
+            if isinstance(meta, dict):
+                fid = meta.get("file_id")
+                sidx = meta.get("start_index") or meta.get("startIndex")
+                if fid is not None and sidx is not None:
+                    key = (fid, sidx)
+            h = _hl.md5(str(doc).encode("utf-8", errors="ignore")).hexdigest()
+            if (key and key in seen_keys) or h in seen_hash:
+                continue
+            if key:
+                seen_keys.add(key)
+            seen_hash.add(h)
+            ordered_docs.append(doc)
+            ordered_metas.append(meta)
+            if distances:
+                ordered_dists.append(dist)
+
+        # Merge anti-overlap: exact match trimming only; otherwise concatenate as-is (zero loss)
+        max_overlap_check = 512
+        overlaps_encountered = 0
+        overlaps_trimmed = 0
+        overlaps_mismatch = 0
+        merged_parts = []
+        last_start = None
+        last_text = ""
+        for i, (doc, meta) in enumerate(zip(ordered_docs, ordered_metas)):
+            text = str(doc)
+            s = None
+            if isinstance(meta, dict):
+                s = meta.get("start_index") or meta.get("startIndex")
+                try:
+                    s = int(s) if s is not None else None
+                except Exception:
+                    s = None
+            if i == 0 or last_start is None or s is None:
+                merged_parts.append(text)
+            else:
+                prev_end = last_start + len(last_text)
+                overlap = prev_end - s
+                if overlap > 0:
+                    overlaps_encountered += 1
+                    o = min(overlap, max_overlap_check, len(last_text), len(text))
+                    if o > 0 and last_text[-o:] == text[:o]:
+                        merged_parts.append(text[o:])
+                        # update current start_index by trimmed overlap to keep offsets consistent
+                        if isinstance(meta, dict):
+                            try:
+                                current_s = meta.get("start_index") or meta.get("startIndex")
+                                if current_s is not None:
+                                    current_s = int(current_s)
+                                    meta["start_index"] = current_s + o
+                            except Exception:
+                                pass
+                        overlaps_trimmed += 1
+                    else:
+                        merged_parts.append(text)
+                        overlaps_mismatch += 1
+                else:
+                    merged_parts.append(text)
+            last_start = s if s is not None else last_start
+            last_text = text
+        merged_doc = "\n".join(merged_parts)
+        try:
+            import re
+            from collections import Counter as _Counter
+            pat = re.compile(r"(DEBUT_[A-Z0-9_]+|MARK_[A-Z0-9_]+|FIN_[A-Z0-9_]+)")
+            mm = len(pat.findall(merged_doc))
+            log.info(f"🧾 RAG audit: post-tri dedupe chunks_before={len(documents)}, after={len(ordered_docs)}, markers_in_merged={mm}")
+            if ordered_metas:
+                first = ordered_metas[0]
+                last = ordered_metas[-1]
+                log.info(f"🧭 RAG audit: first_offset=(p={first.get('page') or first.get('page_number') or first.get('pageIndex')}, s={first.get('start_index') or first.get('startIndex')}), last_offset=(p={last.get('page') or last.get('page_number') or last.get('pageIndex')}, s={last.get('start_index') or last.get('startIndex')})")
+
+            # Overlap and delta(start_index) diagnostics (no behavior change)
+            overlaps_detected = 0
+            overlaps_matched = 0
+            overlaps_mismatch = 0
+            max_overlap = 0
+            delta_counter = _Counter()
+            for i in range(1, len(ordered_metas)):
+                prev_m = ordered_metas[i - 1] if isinstance(ordered_metas[i - 1], dict) else {}
+                curr_m = ordered_metas[i] if isinstance(ordered_metas[i], dict) else {}
+                ps = prev_m.get("start_index") or prev_m.get("startIndex")
+                cs = curr_m.get("start_index") or curr_m.get("startIndex")
+                try:
+                    ps_i = int(ps) if ps is not None else None
+                    cs_i = int(cs) if cs is not None else None
+                except Exception:
+                    ps_i = ps
+                    cs_i = cs
+                if isinstance(ps_i, int) and isinstance(cs_i, int):
+                    delta_counter[cs_i - ps_i] += 1
+                    prev_doc = str(ordered_docs[i - 1]) if i - 1 < len(ordered_docs) else ""
+                    curr_doc = str(ordered_docs[i]) if i < len(ordered_docs) else ""
+                    prev_end = ps_i + len(prev_doc)
+                    overlap = prev_end - cs_i
+                    if overlap > 0:
+                        overlaps_detected += 1
+                        if overlap > max_overlap:
+                            max_overlap = overlap
+                        # Bound overlap to available lengths
+                        o = min(overlap, len(prev_doc), len(curr_doc))
+                        if o > 0:
+                            if prev_doc[-o:] == curr_doc[:o]:
+                                overlaps_matched += 1
+                            else:
+                                overlaps_mismatch += 1
+            if delta_counter:
+                # Log top 8 most common deltas (chunk step/stride insight)
+                top_deltas = sorted(delta_counter.items(), key=lambda kv: kv[1], reverse=True)[:8]
+                log.info(
+                    f"🧾 RAG audit: delta_start_index_top={top_deltas}, overlaps_detected={overlaps_detected}, overlaps_trim_like={overlaps_matched}, overlaps_mismatch={overlaps_mismatch}, max_overlap={max_overlap}"
+                )
+            # Max gap between consecutive offsets (after any trim updates)
+            try:
+                sidx_order = []
+                for m in ordered_metas:
+                    if isinstance(m, dict):
+                        v = m.get('start_index') or m.get('startIndex')
+                        sidx_order.append(int(v) if v is not None and str(v).isdigit() else None)
+                gaps = []
+                last = None
+                for v in sidx_order:
+                    if isinstance(v, int) and isinstance(last, int):
+                        gaps.append(v - last)
+                    last = v if isinstance(v, int) else last
+                if gaps:
+                    log.info(f"🧾 RAG audit: max_gap_between_consecutive_offsets={max(gaps)}")
+            except Exception:
+                pass
+            # Also log anti-overlap trimming summary from merged parts
+            log.info(
+                f"🧾 RAG audit: anti_overlap_summary overlaps_encountered={overlaps_encountered}, overlaps_trimmed={overlaps_trimmed}, overlaps_mismatch={overlaps_mismatch}, max_overlap_checked={max_overlap_check}"
+            )
+            # Post-merge ordering and dedup stats
+            try:
+                ordered_sidx = []
+                for m in ordered_metas:
+                    if isinstance(m, dict):
+                        s = m.get('start_index') or m.get('startIndex')
+                        ordered_sidx.append(s)
+                sample = (ordered_sidx[:12] + ['...'] + ordered_sidx[-12:]) if len(ordered_sidx) > 30 else ordered_sidx
+                log.info(
+                    f"🧾 RAG audit: dedupe_removed_by_offset={removed_by_offset}, dedupe_removed_by_hash={removed_by_hash}, ordered_start_index_sample={sample}"
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+        new_src = {
+            **{k: v for k, v in src.items() if k not in ("document", "metadata", "distances")},
+            "document": [merged_doc],
+            "metadata": [ordered_metas[0] if ordered_metas else {}],
+        }
+        if distances:
+            new_src["distances"] = ordered_dists
+        return new_src
+    # Pre-merge audit: how many contexts and a sample of positions, plus offset metrics
+    try:
+        import json as _json
+        _pos_audit = []
+        total_metas = 0
+        with_sidx = 0
+        missing_sidx = 0
+        with_page = 0
+        missing_page = 0
+        # For duplicate start_index accounting (regardless of page)
+        _sidx_values = []
+        for _ctx in (relevant_contexts or []):
+            _metas = _ctx.get("metadatas", [[]])[0] if isinstance(_ctx.get("metadatas"), list) else []
+            total_metas += len(_metas) if isinstance(_metas, list) else 0
+            _sample = []
+            for _m in list(_metas)[:10] + list(_metas)[-10:]:
+                if isinstance(_m, dict):
+                    p = _m.get("page") or _m.get("page_number") or _m.get("pageIndex")
+                    s = _m.get("start_index") or _m.get("startIndex")
+                    _sample.append({
+                        "page": p,
+                        "start_index": s,
+                    })
+            for _m in (_metas or []):
+                if isinstance(_m, dict):
+                    p = _m.get("page") or _m.get("page_number") or _m.get("pageIndex")
+                    s = _m.get("start_index") or _m.get("startIndex")
+                    if p is None:
+                        missing_page += 1
+                    else:
+                        with_page += 1
+                    if s is None:
+                        missing_sidx += 1
+                    else:
+                        with_sidx += 1
+                        try:
+                            _sidx_values.append(int(s))
+                        except Exception:
+                            _sidx_values.append(s)
+            _pos_audit.append(_sample)
+
+        # Duplicate counts for start_index (ignoring None)
+        try:
+            _sidx_vals_only = [v for v in _sidx_values if v is not None]
+            _unique = len(set(_sidx_vals_only))
+            _dups = max(0, len(_sidx_vals_only) - _unique)
+        except Exception:
+            _unique = 0
+            _dups = 0
+        log.info(
+            f"🧭 RAG audit: pre-merge contexts={len(relevant_contexts)} positions_sample={_json.dumps(_pos_audit)[:1000]}"
+        )
+        log.info(
+            f"🧾 RAG audit: offsets total_metas={total_metas}, with_start_index={with_sidx}, start_index_missing={missing_sidx}, with_page={with_page}, page_missing={missing_page}, start_index_duplicates={_dups}"
+        )
+    except Exception:
+        pass
+
     for context in relevant_contexts:
         try:
             if "documents" in context:
@@ -898,7 +1406,7 @@ def get_sources_from_files_enhanced(
                     if "distances" in context and context["distances"]:
                         source["distances"] = context["distances"][0]
 
-                    sources.append(source)
+                    sources.append(_sort_and_dedupe_source(source))
                     log.debug("✅ Source added successfully")
         except Exception as e:
             log.exception(f"❌ Error processing context: {e}")

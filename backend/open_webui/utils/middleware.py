@@ -52,6 +52,7 @@ from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
 from open_webui.retrieval.utils import get_sources_from_files, get_sources_intelligent_wrapper
+from open_webui.models.files import Files
 
 
 from open_webui.utils.chat import generate_chat_completion
@@ -674,6 +675,308 @@ async def chat_completion_files_handler(
 
         log.debug(f"rag_contexts:sources: {sources}")
         log.info(f"🔍 Content extraction success: {extraction_success} ({len(sources)} sources)")
+        try:
+            import re, json as _json
+            # flatten merged context
+            merged = ''
+            for src in (sources or []):
+                docs = src.get('document', []) if isinstance(src, dict) else []
+                if isinstance(docs, list):
+                    merged += '\n'.join(str(d) for d in docs) + '\n'
+            pat = re.compile(r'(DEBUT_[A-Z0-9_]+|MARK_[A-Z0-9_]+|FIN_[A-Z0-9_]+)')
+            markers = [m.group(0) for m in pat.finditer(merged)]
+            cnt = len(markers)
+            # Small context telemetry
+            try:
+                last_user = get_last_user_message(body.get("messages", []))
+            except Exception:
+                last_user = None
+            model_id = body.get("model")
+            log.info(
+                f"🧾 Handler audit: model={model_id}, ctx_chars={len(merged)}, last_user_chars={len(last_user) if isinstance(last_user, str) else 0}, sources={len(sources)}"
+            )
+            # Token budget audit (approx): assume 4 chars per token, detect model window reliably
+            try:
+                import os
+                from open_webui.models.models import Models as _Models
+                model_id = body.get("model")
+                detected_window = None
+                detected_source = None
+                # 1) Try DB params (num_ctx / max_tokens / context_length)
+                try:
+                    db_model = _Models.get_model_by_id(model_id)
+                    if db_model and getattr(db_model, 'params', None):
+                        p = db_model.params
+                        p_dict = p.model_dump() if hasattr(p, 'model_dump') else (dict(p) if isinstance(p, dict) else {})
+                        for key in ("num_ctx", "max_tokens", "context_length", "context_window", "ctx"):
+                            if key in p_dict and p_dict.get(key):
+                                detected_window = int(p_dict.get(key))
+                                detected_source = f"db:{key}"
+                                break
+                except Exception:
+                    pass
+                # 2) Fallback to env MODEL_WINDOW_TOKENS or MODEL_CONTEXT_TOKENS
+                if not detected_window:
+                    env_val = os.getenv('MODEL_WINDOW_TOKENS') or os.getenv('MODEL_CONTEXT_TOKENS')
+                    if env_val:
+                        detected_window = int(env_val)
+                        detected_source = 'env'
+                # 3) Final fallback
+                if not detected_window:
+                    detected_window = 8192
+                    detected_source = 'fallback'
+
+                approx_tokens = int(len(merged) / 4) + int((len(last_user) if isinstance(last_user, str) else 0) / 4)
+                would_truncate = approx_tokens > detected_window
+                log.info(f"🧾 model_window_detected tokens={detected_window} source={detected_source}")
+                log.info(f"🧾 Handler audit: token_budget_estimate tokens={approx_tokens}, budget={detected_window}, would_truncate={would_truncate}")
+            except Exception:
+                pass
+            # Log a short sample of the actual last user prompt (truncated)
+            try:
+                if isinstance(last_user, str):
+                    sample_prompt = (last_user[:400] + "…") if len(last_user) > 400 else last_user
+                    log.info(f"🧾 Prompt audit: last_user_message_sample={_json.dumps(sample_prompt, ensure_ascii=False)}")
+            except Exception:
+                pass
+            # Payload messages stats
+            try:
+                msgs = body.get('messages', []) or []
+                total_chars = 0
+                for m in msgs:
+                    c = m.get('content') if isinstance(m, dict) else None
+                    if isinstance(c, str):
+                        total_chars += len(c)
+                log.info(f"🧾 Handler audit: messages_count={len(msgs)}, total_messages_chars={total_chars}")
+            except Exception:
+                pass
+            # Sample markers to avoid flooding logs
+            sample = (markers[:20] + ["..."] + markers[-20:]) if cnt > 45 else markers
+            log.info(f"🧾 Handler audit: markers_in_injected_context={cnt} sample={_json.dumps(sample, ensure_ascii=False)[:1000]}")
+
+            # Optional coverage: markers count on full document(s) from Files storage
+            try:
+                file_ids = []
+                for src in (sources or []):
+                    metas = src.get('metadata', []) if isinstance(src, dict) else []
+                    if isinstance(metas, list):
+                        for m in metas:
+                            if isinstance(m, dict) and m.get('file_id'):
+                                file_ids.append(m.get('file_id'))
+                file_ids = list({fid for fid in file_ids if fid})  # unique
+                full_count = 0
+                expected_markers = []
+                if file_ids:
+                    for fid in file_ids:
+                        fo = Files.get_file_by_id(fid)
+                        if fo:
+                            content = (fo.data or {}).get('content') or ''
+                            # markers in full doc, in order
+                            expected_markers.extend([m.group(0) for m in pat.finditer(content)])
+                    full_count = len(expected_markers)
+                    log.info(f"🧾 Handler audit: full_doc_marker_count={full_count}, injected_marker_count={cnt}, files_considered={len(file_ids)}")
+                    # Coverage diff: missing bytes
+                    import re as _re
+                    mm = _re.compile(r"MARK_(\d+)_OCTETS?_([0-9]{3})")
+                    def bytes_from(markers_list):
+                        out = []
+                        for m in markers_list:
+                            g = mm.match(m)
+                            if g:
+                                try:
+                                    out.append(int(g.group(1)))
+                                except Exception:
+                                    pass
+                        return out
+                    expected_bytes = bytes_from(expected_markers)
+                    injected_bytes = bytes_from(markers)
+                    missing = sorted(list(set(expected_bytes) - set(injected_bytes)))
+                    expected_unique = len(set(expected_bytes))
+                    injected_unique = len(set(injected_bytes))
+                    ratio = (injected_unique / expected_unique) if expected_unique else 0.0
+                    log.info(f"🧾 Handler audit: coverage_diff missing_bytes={missing}, expected_bytes_count={expected_unique}, injected_unique={injected_unique}, coverage_bytes_ratio={ratio:.3f}")
+            except Exception:
+                pass
+
+            # Duplicate MARK bytes analysis
+            try:
+                import re as _re
+                mm = _re.compile(r"MARK_(\d+)_OCTETS?_([0-9]{3})")
+                bytes_vals = []
+                for m in markers:
+                    g = mm.match(m)
+                    if g:
+                        try:
+                            bytes_vals.append(int(g.group(1)))
+                        except Exception:
+                            pass
+                unique_count = len(set(bytes_vals))
+                # Find duplicates (value appears more than once)
+                from collections import Counter
+                c = Counter(bytes_vals)
+                dups = sorted([v for v, n in c.items() if n > 1])
+                log.info(
+                    f"🧾 Handler audit: unique_bytes_count={unique_count}, duplicate_bytes={dups}"
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Integrity validation of markers and deterministic order; fallback FULL if it fails
+        def _extract_markers(text: str):
+            try:
+                import re
+                pat = re.compile(r"(DEBUT_[A-Z0-9_]+|MARK_[A-Z0-9_]+|FIN_[A-Z0-9_]+)")
+                return [m.group(0) for m in pat.finditer(text or "")]
+            except Exception:
+                return []
+
+        def _check_integrity(markers):
+            import re
+            if not markers:
+                return False, {"error": "no_markers"}
+            debut = markers[0] if markers else None
+            fin = markers[-1] if markers else None
+            if not debut or not fin or not debut.startswith("DEBUT_") or not fin.startswith("FIN_"):
+                return False, {"error": "missing_debut_or_fin", "first": debut, "last": fin}
+            # suffix consistency and increasing bytes for MARK
+            suf = None
+            bytes_vals = []
+            ok = True
+            mm = re.compile(r"MARK_(\d+)_OCTETS?_([0-9]{3})")
+            for m in markers:
+                if m.startswith("MARK_"):
+                    g = mm.match(m)
+                    if g:
+                        b = int(g.group(1))
+                        s = g.group(2)
+                        if suf is None:
+                            suf = s
+                        ok = ok and (s == suf)
+                        bytes_vals.append(b)
+            if not ok:
+                return False, {"error": "doc_suffix_mismatch"}
+            if any(bytes_vals[i] >= bytes_vals[i+1] for i in range(len(bytes_vals)-1)):
+                return False, {"error": "bytes_not_increasing", "bytes": bytes_vals}
+            return True, {"bytes": bytes_vals}
+
+        # Build concatenated ordered text from sources for integrity check and audit
+        concatenated = ""
+        for src in (sources or []):
+            docs = src.get("document", []) if isinstance(src, dict) else []
+            if isinstance(docs, list):
+                concatenated += "\n".join(str(d) for d in docs) + "\n"
+
+        markers = _extract_markers(concatenated)
+        ok_integrity, info_integrity = _check_integrity(markers)
+        log.info(f"📏 Integrity check: ok={ok_integrity} details={info_integrity}")
+
+        # Chunk-order audit log (page/start_index) for traceability
+        try:
+            audit = []
+            for src in (sources or []):
+                metas = src.get("metadata", []) if isinstance(src, dict) else []
+                if isinstance(metas, list):
+                    positions = []
+                    for m in metas:
+                        if isinstance(m, dict):
+                            positions.append({
+                                "page": m.get("page") or m.get("page_number") or m.get("pageIndex"),
+                                "start_index": m.get("start_index") or m.get("startIndex"),
+                            })
+                    audit.append(positions)
+            log.info(f"🧭 Chunk order audit: {json.dumps(audit)[:1000]}")
+        except Exception:
+            pass
+
+        # Fallback to FULL context if integrity fails and not already in full_context
+        if not ok_integrity and not request.app.state.config.RAG_FULL_CONTEXT:
+            log.warning("🔁 Integrity failed — retrying with FULL context mode")
+            loop = asyncio.get_running_loop()
+            with ThreadPoolExecutor(max_workers=RAG_THREADPOOL_MAX_WORKERS.value) as executor:
+                sources = await loop.run_in_executor(
+                    executor,
+                    lambda: get_sources_intelligent_wrapper(
+                        request=request,
+                        files=files,
+                        queries=queries,
+                        embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                            query, prefix=prefix, user=user
+                        ),
+                        k=request.app.state.config.TOP_K,
+                        reranking_function=request.app.state.rf,
+                        k_reranker=request.app.state.config.TOP_K_RERANKER,
+                        r=request.app.state.config.RELEVANCE_THRESHOLD,
+                        hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+                        full_context=True,
+                        user=user,
+                    ),
+                )
+            log.info(f"🔁 FULL context retry produced {len(sources)} sources")
+
+        # Phase 1.1: Minimal gap-fill before injection (outside compact mode)
+        try:
+            import re as _re, os as _os
+            user_prompt = get_last_user_message(body.get("messages", [])) or ""
+            compact_flag = _os.getenv('ENABLE_COMPACT_MARKER_CONTEXT', '1') == '1'
+            marker_pat = _re.compile(r"(DEBUT_[A-Z0-9_]+|MARK_[A-Z0-9_]+|FIN_[A-Z0-9_]+)|listez\s+TOUS\s+les\s+marqueurs|order\s+of\s+appearance", _re.IGNORECASE)
+            marker_prompt = bool(marker_pat.search(user_prompt))
+            if not marker_prompt:
+                # Compute expected vs injected bytes again
+                pat = _re.compile(r'(DEBUT_[A-Z0-9_]+|MARK_[A-Z0-9_]+|FIN_[A-Z0-9_]+)')
+                current = ''
+                for src in (sources or []):
+                    docs = src.get('document', []) if isinstance(src, dict) else []
+                    if isinstance(docs, list):
+                        current += '\n'.join(str(d) for d in docs) + '\n'
+                injected_markers = [m.group(0) for m in pat.finditer(current)]
+                mm = _re.compile(r"MARK_(\d+)_OCTETS?_([0-9]{3})")
+                def bytes_from(lst):
+                    out = []
+                    for m in lst:
+                        g = mm.match(m)
+                        if g:
+                            try:
+                                out.append(int(g.group(1)))
+                            except Exception:
+                                pass
+                    return out
+                # expected from Files
+                file_ids = []
+                for src in (sources or []):
+                    metas = src.get('metadata', []) if isinstance(src, dict) else []
+                    if isinstance(metas, list):
+                        for m in metas:
+                            if isinstance(m, dict) and m.get('file_id'):
+                                file_ids.append(m.get('file_id'))
+                file_ids = list({fid for fid in file_ids if fid})
+                expected_markers = []
+                if file_ids:
+                    from open_webui.models.files import Files as _Files
+                    for fid in file_ids:
+                        fo = _Files.get_file_by_id(fid)
+                        if fo:
+                            content = (fo.data or {}).get('content') or ''
+                            expected_markers.extend([m.group(0) for m in pat.finditer(content)])
+                expected_bytes = set(bytes_from(expected_markers))
+                injected_bytes = set(bytes_from(injected_markers))
+                missing = sorted(list(expected_bytes - injected_bytes))
+                if missing:
+                    # Build missing marker strings from expected_markers
+                    missing_set = set(missing)
+                    missing_strs = []
+                    for m in expected_markers:
+                        g = mm.match(m)
+                        if g and int(g.group(1)) in missing_set:
+                            missing_strs.append(m)
+                    if missing_strs:
+                        gap_doc = "\n".join(missing_strs)
+                        gap_meta = [{"file_id": file_ids[0] if file_ids else None}]
+                        sources.append({"source": {"name": "gap_fill"}, "document": [gap_doc], "metadata": gap_meta})
+                        log.info(f"🧾 Handler audit: gap_fill applied=true, added_markers={len(missing_strs)}")
+        except Exception:
+            pass
 
     return body, {"sources": sources, "extraction_success": extraction_success, "files_processed": len(files) if files else 0}
 
@@ -928,15 +1231,59 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if len(sources) > 0:
         context_string = ""
         citated_file_idx = {}
-        for _, source in enumerate(sources, 1):
-            if "document" in source:
-                for doc_context, doc_meta in zip(
-                    source["document"], source["metadata"]
-                ):
-                    file_id = doc_meta.get("file_id")
-                    if file_id not in citated_file_idx:
-                        citated_file_idx[file_id] = len(citated_file_idx) + 1
-                    context_string += f'<source id="{citated_file_idx[file_id]}">{doc_context}</source>\n'
+        # Detect marker-listing prompt and use compact marker context to avoid truncation
+        try:
+            import re as _re
+            user_prompt = get_last_user_message(form_data["messages"]) or ""
+            marker_prompt = bool(_re.search(r"\b(MARK_\w+OCTETS_\w+|DEBUT_\w+|FIN_\w+)\b|listez TOUS les marqueurs|ordre d'apparition", user_prompt, _re.IGNORECASE))
+        except Exception:
+            marker_prompt = False
+
+        if marker_prompt:
+            try:
+                # Build compact context from full Files content (ordered markers only)
+                pat = _re.compile(r'(DEBUT_[A-Z0-9_]+|MARK_[A-Z0-9_]+|FIN_[A-Z0-9_]+)')
+                file_ids = []
+                for src in (sources or []):
+                    metas = src.get('metadata', []) if isinstance(src, dict) else []
+                    if isinstance(metas, list):
+                        for m in metas:
+                            if isinstance(m, dict) and m.get('file_id'):
+                                file_ids.append(m.get('file_id'))
+                file_ids = list({fid for fid in file_ids if fid})
+                compact = []
+                from open_webui.models.files import Files as _Files
+                for fid in file_ids:
+                    fo = _Files.get_file_by_id(fid)
+                    if fo:
+                        content = (fo.data or {}).get('content') or ''
+                        compact.extend([m.group(0) for m in pat.finditer(content)])
+                # Build minimal context string
+                context_string = '<source id="1">' + "\n".join(compact) + '</source>'
+                log.info(f"🧾 Handler audit: compact_marker_context=true, markers={len(compact)}")
+            except Exception as e:
+                log.exception(e)
+                # fallback to regular merged sources below
+                context_string = ""
+                for _, source in enumerate(sources, 1):
+                    if "document" in source:
+                        for doc_context, doc_meta in zip(
+                            source["document"], source["metadata"]
+                        ):
+                            file_id = doc_meta.get("file_id")
+                            if file_id not in citated_file_idx:
+                                citated_file_idx[file_id] = len(citated_file_idx) + 1
+                            context_string += f'<source id="{citated_file_idx[file_id]}">{doc_context}</source>\n'
+        else:
+            for _, source in enumerate(sources, 1):
+                if "document" in source:
+                    for doc_context, doc_meta in zip(
+                        source["document"], source["metadata"]
+                    ):
+                        file_id = doc_meta.get("file_id")
+                        if file_id not in citated_file_idx:
+                            citated_file_idx[file_id] = len(citated_file_idx) + 1
+                        context_string += f'<source id="{citated_file_idx[file_id]}">{doc_context}</source>\n'
 
         context_string = context_string.strip()
         prompt = get_last_user_message(form_data["messages"])
@@ -954,12 +1301,33 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         # Workaround for Ollama 2.0+ system prompt issue
         # TODO: replace with add_or_update_system_message
         if model.get("owned_by") == "ollama":
-            form_data["messages"] = prepend_to_first_user_message_content(
-                rag_template(
+            # Mode d'injection configurable pour Ollama (feature flag):
+            # - ENABLE_OLLAMA_USER_REPLACE=1 (par défaut): remplace le dernier message user par le template RAG
+            # - ENABLE_OLLAMA_USER_REPLACE=0: revient à prepend (comportement historique)
+            import os as _os
+            try:
+                new_content = rag_template(
                     request.app.state.config.RAG_TEMPLATE, context_string, prompt
-                ),
-                form_data["messages"],
-            )
+                )
+                msgs = form_data.get("messages", []) or []
+                replace_mode = _os.getenv('ENABLE_OLLAMA_USER_REPLACE', '1') == '1'
+                if replace_mode:
+                    # Remplacer le dernier message user si présent, sinon en ajouter un
+                    if msgs and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "user":
+                        msgs[-1]["content"] = new_content
+                    else:
+                        msgs.append({"role": "user", "content": new_content})
+                    log.info("🧾 ollama_prompt_mode=replace_last_user")
+                else:
+                    # Préfixer le premier message user (comportement historique)
+                    form_data["messages"] = prepend_to_first_user_message_content(
+                        new_content,
+                        msgs,
+                    )
+                    log.info("🧾 ollama_prompt_mode=prepend_first_user")
+                form_data["messages"] = msgs if replace_mode else form_data["messages"]
+            except Exception as e:
+                log.exception(e)
         else:
             form_data["messages"] = add_or_update_system_message(
                 rag_template(
@@ -967,6 +1335,29 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 ),
                 form_data["messages"],
             )
+
+        # 🧾 Payload head/tail audit: preuve formelle du contenu transmis
+        try:
+            import json as _json
+            # Context preview
+            ctx_head = context_string[:200]
+            ctx_tail = context_string[-200:] if len(context_string) > 200 else context_string
+            # Messages concatenation preview (contents only)
+            msgs = form_data.get("messages", []) or []
+            joined = "\n".join([
+                (m.get("content") if isinstance(m, dict) and isinstance(m.get("content"), str) else "")
+                for m in msgs
+            ])
+            pay_head = joined[:200]
+            pay_tail = joined[-200:] if len(joined) > 200 else joined
+            log.info(
+                f"🧾 payload_head/tail: context_chars={len(context_string)}, context_head={_json.dumps(ctx_head, ensure_ascii=False)}, context_tail={_json.dumps(ctx_tail, ensure_ascii=False)}, messages_chars={len(joined)}, messages_head={_json.dumps(pay_head, ensure_ascii=False)}, messages_tail={_json.dumps(pay_tail, ensure_ascii=False)}"
+            )
+            # Final context integrity audit (post-template): verify that context got embedded
+            integrity_ok = bool(len(context_string) > 0 and isinstance(joined, str) and ("<source" in joined))
+            log.info(f"🧾 final_context_integrity ok={integrity_ok}, context_chars={len(context_string)}, messages_chars={len(joined)}")
+        except Exception:
+            pass
 
     # If there are citations, add them to the data_items
     sources = [source for source in sources if source.get("source", {}).get("name", "")]

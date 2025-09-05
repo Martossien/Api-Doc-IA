@@ -97,6 +97,17 @@ def upload_file(
         filename = f"{id}_{filename}"
         contents, file_path = Storage.upload_file(file.file, filename)
 
+        # Compute checksum and reuse existing file (by same user) if identical content
+        import hashlib
+        checksum = hashlib.sha256(contents).hexdigest()
+        try:
+            existing = Files.get_file_by_hash_and_user(checksum, user.id)
+        except Exception:
+            existing = None
+        if existing:
+            log.info(f"Duplicate upload by hash, reusing file {existing.id}")
+            return existing
+
         file_item = Files.insert_new_file(
             user.id,
             FileForm(
@@ -108,6 +119,7 @@ def upload_file(
                         "name": name,
                         "content_type": file.content_type,
                         "size": len(contents),
+                        "checksum": checksum,
                         "data": file_metadata,
                     },
                 }

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export DATA_DIR=/home/admin_ia/Api-Doc-IA/backend/data
+export DATA_DIR="$BACKEND_PATH/data"
 
 # =============================================================================
 # 🚀 API-DOC-IA UNIVERSAL STARTUP SCRIPT (SECURE v2)

@@ -1484,7 +1484,7 @@ except Exception as e:
 # VERIFICATION
 # =============================================================================
 
-verify_installation() {
+  verify_installation() {
     echo -e "${BLUE}🧪 Verifying installation...${NC}"
     
     # Load SQLite environment if available (FOR VERIFICATION ONLY)
@@ -1593,8 +1593,139 @@ print('\\n🎉 Core dependency verification completed!')
             echo -e "${YELLOW}💡 Continuing with graceful degradation mode${NC}"
         fi
     }
-}
+  }
+  
+  # =============================================================================
+  # POST-INSTALL FINALIZATION (ownership, paths, env)
+  # =============================================================================
+  
+  post_install_finalize() {
+      echo -e "${BLUE}🧩 Finalisation post‑installation...${NC}"
+      
+      local REPO_PATH
+      REPO_PATH="$(realpath "$PROJECT_ROOT" 2>/dev/null || echo "$PROJECT_ROOT")"
+      local CUR_USER CUR_GROUP OWNER_GROUP
+      CUR_USER="$(id -un)"
+      CUR_GROUP="$(id -gn)"
+      OWNER_GROUP="$(stat -c '%U:%G' "$REPO_PATH" 2>/dev/null || echo '')"
+      
+      # 1) Proposer un chown si nécessaire (si non propriétaire ou non inscriptible)
+      if [ -n "$OWNER_GROUP" ]; then
+          local OWNER OWNERGRP
+          OWNER="${OWNER_GROUP%%:*}"
+          OWNERGRP="${OWNER_GROUP##*:}"
+          if [ "$OWNER" != "$CUR_USER" ] || [ ! -w "$REPO_PATH" ]; then
+              echo -e "${YELLOW}⚠️ Le répertoire du projet n'est pas détenu par l'utilisateur actif ou n'est pas inscriptible.${NC}"
+              echo -e "${YELLOW}   Projet: $REPO_PATH${NC}"
+              echo -e "${YELLOW}   Actuel: $OWNER:$OWNERGRP | Utilisateur: $CUR_USER:$CUR_GROUP${NC}"
+              if command -v sudo >/dev/null 2>&1; then
+                  read -p "Appliquer sudo chown -R $CUR_USER:$CUR_GROUP '$REPO_PATH' ? (Y/n): " -r REPLY_CHOWN
+                  if [[ ! $REPLY_CHOWN =~ ^[Nn]$ ]]; then
+                      if sudo chown -R "$CUR_USER:$CUR_GROUP" "$REPO_PATH"; then
+                          echo -e "${GREEN}✅ Permissions corrigées${NC}"
+                      else
+                          echo -e "${RED}❌ Échec du chown. Corrige manuellement puis relance start.sh.${NC}"
+                      fi
+                  else
+                      echo -e "${YELLOW}↪️  Chown ignoré par l'utilisateur${NC}"
+                  fi
+              else
+                  echo -e "${YELLOW}💡 sudo indisponible. Corrige manuellement: chown -R $CUR_USER:$CUR_GROUP '$REPO_PATH'${NC}"
+              fi
+          fi
+      fi
+      
+      # 2) Corriger DATA_DIR codé en dur dans start.sh si présent
+      if [ -f "$PROJECT_ROOT/start.sh" ]; then
+          if grep -qE '^export[[:space:]]+DATA_DIR=' "$PROJECT_ROOT/start.sh"; then
+              CURRENT_DATA_DIR_LINE="$(grep -E '^export[[:space:]]+DATA_DIR=' "$PROJECT_ROOT/start.sh" | head -1)"
+              if ! echo "$CURRENT_DATA_DIR_LINE" | grep -q '\$BACKEND_PATH/data'; then
+                  echo -e "${YELLOW}⚠️ Ligne DATA_DIR détectée dans start.sh:${NC}"
+                  echo -e "${YELLOW}   $CURRENT_DATA_DIR_LINE${NC}"
+                  echo -e "${BLUE}Proposer remplacement par: export DATA_DIR=\"$BACKEND_PATH/data\"${NC}"
+                  read -p "Appliquer la correction automatique ? (Y/n): " -r REPLY_DATA
+                  if [[ ! $REPLY_DATA =~ ^[Nn]$ ]]; then
+                      sed -i 's|^export[[:space:]]\+DATA_DIR=.*|export DATA_DIR="$BACKEND_PATH/data"|' "$PROJECT_ROOT/start.sh"
+                      echo -e "${GREEN}✅ DATA_DIR corrigé dans start.sh${NC}"
+                  else
+                      echo -e "${YELLOW}↪️  Correction DATA_DIR ignorée par l'utilisateur${NC}"
+                  fi
+              fi
+          fi
+      fi
+      
+      # 3) Chemins absolus erronés vers Api-Doc-IA → proposer correction vers REPO_PATH
+      echo -e "${BLUE}🔎 Recherche de chemins absolus codés en dur vers Api-Doc-IA...${NC}"
+      MAP_FILE_LIST="$(grep -RIl --exclude-dir='.git' --include='*.sh' '/home/admia/Api-Doc-IA' "$PROJECT_ROOT" 2>/dev/null || true)"
+      if [ -z "$MAP_FILE_LIST" ]; then
+          # Pattern plus précis
+          MAP_FILE_LIST="$(grep -RIl --exclude-dir='.git' --include='*.sh' '/home/[^/][^/]*/Api-Doc-IA' "$PROJECT_ROOT" 2>/dev/null || true)"
+      fi
+      if [ -n "$MAP_FILE_LIST" ]; then
+          echo -e "${YELLOW}⚠️ Des chemins absolus ont été trouvés dans:${NC}"
+          echo "$MAP_FILE_LIST" | sed 's/^/   • /'
+          echo -e "${BLUE}Proposer de remplacer ces chemins par: $REPO_PATH${NC}"
+          read -p "Appliquer la correction à ces fichiers ? (Y/n): " -r REPLY_PATHS
+          if [[ ! $REPLY_PATHS =~ ^[Nn]$ ]]; then
+              while IFS= read -r f; do
+                  [ -z "$f" ] && continue
+                  sed -i "s|/home/[^/][^/]*/Api-Doc-IA|$REPO_PATH|g" "$f"
+              done <<< "$MAP_FILE_LIST"
+              echo -e "${GREEN}✅ Chemins mis à jour${NC}"
+          else
+              echo -e "${YELLOW}↪️  Correction des chemins ignorée par l'utilisateur${NC}"
+          fi
+      else
+          echo -e "${GREEN}✅ Aucun chemin absolu problématique détecté (scripts .sh)${NC}"
+      fi
+      
+      # 4) .env à partir de .env.example
+      if [ -f "$PROJECT_ROOT/.env" ]; then
+          echo -e "${GREEN}✅ Fichier .env détecté${NC}"
+      else
+          if [ -f "$PROJECT_ROOT/.env.example" ]; then
+              read -p "Créer .env depuis .env.example ? (Y/n): " -r REPLY_ENV
+              if [[ ! $REPLY_ENV =~ ^[Nn]$ ]]; then
+                  cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env"
+                  echo -e "${GREEN}✅ .env créé${NC}"
+              else
+                  echo -e "${YELLOW}↪️  Création de .env ignorée par l'utilisateur${NC}"
+              fi
+          else
+              echo -e "${YELLOW}💡 Aucun .env.example trouvé. Étape ignorée.${NC}"
+          fi
+      fi
 
+      # 4bis) Injecter des clés conseillées si absentes
+      local ENV_PATH="$PROJECT_ROOT/.env"
+      if [ -f "$ENV_PATH" ]; then
+          ensure_env_key() {
+              local key="$1"; shift
+              local value="$1"; shift
+              if ! grep -Eq "^${key}=" "$ENV_PATH"; then
+                  echo "${key}=${value}" >> "$ENV_PATH"
+                  echo -e "${GREEN}✅ Ajout dans .env: ${key}=${value}${NC}"
+              fi
+          }
+          ensure_env_key "CORS_ALLOW_ORIGIN" "http://localhost:8080"
+          ensure_env_key "CHROMADB_TELEMETRY" "false"
+          ensure_env_key "ANONYMIZED_TELEMETRY" "false"
+          ensure_env_key "JOBLIB_TEMP_FOLDER" "\${DATA_DIR}/tmp"
+      fi
+
+      # 4ter) Créer le dossier temp joblib si DATA_DIR connu
+      local DATA_DIR_PATH
+      DATA_DIR_PATH=$(grep -E '^DATA_DIR=' "$ENV_PATH" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^"\(.*\)"$/\1/' )
+      if [ -n "$DATA_DIR_PATH" ]; then
+          mkdir -p "$DATA_DIR_PATH/tmp" 2>/dev/null || true
+      fi
+      
+      # 5) Résumé
+      echo ""
+      echo -e "${GREEN}🎯 Finalisation terminée. Vous pouvez lancer:${NC}"
+      echo -e "   ./start.sh"
+  }
+  
 # =============================================================================
 # MAIN INSTALLATION FLOW
 # =============================================================================
@@ -1659,6 +1790,10 @@ main() {
     
     # Verification
     verify_installation
+    echo ""
+    
+    # Post-installation assistant to finalize permissions and paths
+    post_install_finalize
     echo ""
     
     # Final instructions

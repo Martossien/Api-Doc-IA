@@ -80,6 +80,9 @@ psutil
 sentencepiece
 soundfile==0.13.1
 azure-ai-documentintelligence==1.0.0
+ebooklib>=0.18
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
 
 pillow==11.1.0
 opencv-python-headless==4.11.0.86

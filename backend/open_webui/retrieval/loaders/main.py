@@ -24,7 +24,47 @@ from langchain_community.document_loaders import (
 from langchain_core.documents import Document
 
 from open_webui.retrieval.loaders.mistral import MistralLoader
-from open_webui.retrieval.loaders.odt_loader import OdtNativeLoader, ODT_MIME
+try:
+    # Nouveau loader OpenDocument (avec compat OdtNativeLoader)
+    from open_webui.retrieval.loaders.odt_loader import (
+        OpenDocumentNativeLoader,
+        OdtNativeLoader,
+        OPENDOCUMENT_MIMES,
+        ODT_MIME,
+    )
+except Exception:
+    ODT_MIME = "application/vnd.oasis.opendocument.text"
+    OPENDOCUMENT_MIMES = {
+        "odt": ODT_MIME,
+        "ods": "application/vnd.oasis.opendocument.spreadsheet",
+        "odp": "application/vnd.oasis.opendocument.presentation",
+    }
+
+    class OpenDocumentNativeLoader:
+        def __init__(self, file_path: str, mime_type: str | None = None):
+            self.file_path = file_path
+            self.mime_type = mime_type
+
+        def load(self):
+            raise ImportError(
+                "OpenDocument loader not available. Add 'open_webui.retrieval.loaders.odt_loader'."
+            )
+
+    # Backwards compat alias
+    OdtNativeLoader = OpenDocumentNativeLoader
+
+try:
+    from open_webui.retrieval.loaders.epub_loader import EbookLibLoader
+except Exception:
+    class EbookLibLoader:
+        def __init__(self, file_path: str):
+            self.file_path = file_path
+
+        def load(self):
+            # Fallback ultime — UnstructuredEPubLoader sera utilisé plus tard si disponible
+            from langchain_community.document_loaders import UnstructuredEPubLoader
+
+            return UnstructuredEPubLoader(self.file_path).load()
 
 from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL
 
@@ -228,23 +268,28 @@ class Loader:
     def _get_loader(self, filename: str, file_content_type: str, file_path: str):
         file_ext = filename.split(".")[-1].lower()
 
-        # Support explicite ODT (OpenDocument)
-        if file_ext == "odt" or (file_content_type and file_content_type.startswith("application/vnd.oasis.opendocument")):
+        # Support explicite OpenDocument (ODT/ODS/ODP)
+        if (
+            file_ext in ["odt", "ods", "odp"]
+            or (file_content_type and file_content_type.startswith("application/vnd.oasis.opendocument"))
+        ):
             # Priorité à l'engine explicitement demandé (comportement existant conservé)
             if self.engine == "tika" and self.kwargs.get("TIKA_SERVER_URL"):
                 return TikaLoader(
                     url=self.kwargs.get("TIKA_SERVER_URL"),
                     file_path=file_path,
-                    mime_type=file_content_type or "application/vnd.oasis.opendocument.text",
+                    mime_type=file_content_type
+                    or OPENDOCUMENT_MIMES.get(file_ext, ODT_MIME),
                 )
             if self.engine == "docling" and self.kwargs.get("DOCLING_SERVER_URL"):
                 return DoclingLoader(
                     url=self.kwargs.get("DOCLING_SERVER_URL"),
                     file_path=file_path,
-                    mime_type=file_content_type or "application/vnd.oasis.opendocument.text",
+                    mime_type=file_content_type
+                    or OPENDOCUMENT_MIMES.get(file_ext, ODT_MIME),
                 )
-            # Mode auto: ODT natif par défaut (odfdo→odfpy→zip+xml)
-            return OdtNativeLoader(file_path)
+            # Mode auto: natif OpenDocument (odfdo→odfpy→zip+xml)
+            return OpenDocumentNativeLoader(file_path, mime_type=file_content_type)
 
         if self.engine == "tika" and self.kwargs.get("TIKA_SERVER_URL"):
             if self._is_text_file(file_ext, file_content_type):
@@ -294,13 +339,16 @@ class Loader:
             loader = MistralLoader(
                 api_key=self.kwargs.get("MISTRAL_OCR_API_KEY"), file_path=file_path
             )
-        # ODT natif (auto/fallback), en conservant la priorité admin pour Tika/Docling ci-dessus
+        # OpenDocument natif (auto/fallback), si non capté plus haut
         elif (
-            file_ext == "odt"
+            file_ext in ["odt", "ods", "odp"]
             or (file_content_type and file_content_type.startswith("application/vnd.oasis.opendocument"))
             or file_content_type == ODT_MIME
         ):
-            loader = OdtNativeLoader(file_path)
+            loader = OpenDocumentNativeLoader(file_path, mime_type=file_content_type)
+        elif file_ext == "epub" or file_content_type == "application/epub+zip":
+            # EPUB prioritaire: EbookLibLoader, fallback Unstructured dans l'implémentation
+            loader = EbookLibLoader(file_path)
         else:
             if file_ext == "doc" or file_content_type == "application/msword":
                 # Support du format DOC legacy via Unstructured

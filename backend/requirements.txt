@@ -93,6 +93,10 @@ faster-whisper==1.1.1
 PyJWT[crypto]==2.10.1
 authlib==1.4.1
 
+# ODT extraction
+odfdo>=3.16.4,<4.0
+odfpy>=1.4.1,<2.0
+
 black==25.1.0
 langfuse==2.44.0
 youtube-transcript-api==1.0.3
@@ -140,3 +144,4 @@ opentelemetry-instrumentation-requests==0.52b1
 opentelemetry-instrumentation-logging==0.52b1
 opentelemetry-instrumentation-httpx==0.52b1
 opentelemetry-instrumentation-aiohttp-client==0.52b1
+defusedxml>=0.7.1

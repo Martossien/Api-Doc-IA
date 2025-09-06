@@ -3,6 +3,7 @@ import logging
 import mimetypes
 import os
 import shutil
+import time
 
 import uuid
 from datetime import datetime
@@ -1069,6 +1070,21 @@ def process_file(
             file_path = file.path
             if file_path:
                 file_path = Storage.get_file(file_path)
+                # Logs de diagnostic extraction
+                try:
+                    _content_type = file.meta.get("content_type") if isinstance(file.meta, dict) else None
+                except Exception:
+                    _content_type = None
+                _engine = request.app.state.config.CONTENT_EXTRACTION_ENGINE
+                _file_ext = (file.filename.split(".")[-1].lower() if "." in file.filename else "")
+                try:
+                    _fsize = os.path.getsize(file_path)
+                except Exception:
+                    _fsize = None
+                log.info(
+                    f"[EXTRACTION] Préparation: engine={_engine or 'auto'} | filename={file.filename} | ext={_file_ext} | content_type={_content_type} | size_bytes={_fsize}"
+                )
+
                 loader = Loader(
                     engine=request.app.state.config.CONTENT_EXTRACTION_ENGINE,
                     TIKA_SERVER_URL=request.app.state.config.TIKA_SERVER_URL,
@@ -1078,9 +1094,55 @@ def process_file(
                     DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
                     MISTRAL_OCR_API_KEY=request.app.state.config.MISTRAL_OCR_API_KEY,
                 )
-                docs = loader.load(
-                    file.filename, file.meta.get("content_type"), file_path
-                )
+                _t0 = time.time()
+                try:
+                    docs = loader.load(
+                        file.filename, file.meta.get("content_type"), file_path
+                    )
+                    _dt = time.time() - _t0
+                    log.info(
+                        f"[EXTRACTION] Terminé: engine={_engine or 'auto'} | filename={file.filename} | docs={len(docs)} | duration={_dt:.2f}s"
+                    )
+                except Exception as _ex:
+                    _dt = time.time() - _t0
+                    log.error(
+                        f"[EXTRACTION] Échec: engine={_engine or 'auto'} | filename={file.filename} | duration={_dt:.2f}s | erreur={str(_ex)}"
+                    )
+                    # Fallback PDF: si extract_images True provoque une erreur PIL, relancer sans extract_images
+                    try:
+                        _ext = (file.filename.split(".")[-1].lower() if "." in file.filename else "")
+                    except Exception:
+                        _ext = ""
+                    if _ext == "pdf" and request.app.state.config.PDF_EXTRACT_IMAGES:
+                        if "Cannot handle this data type" in str(_ex) or "PIL" in str(_ex):
+                            try:
+                                log.warning("[EXTRACTION] Fallback PDF sans extract_images pour %s", file.filename)
+                                loader_noimg = Loader(
+                                    engine=request.app.state.config.CONTENT_EXTRACTION_ENGINE,
+                                    TIKA_SERVER_URL=request.app.state.config.TIKA_SERVER_URL,
+                                    DOCLING_SERVER_URL=request.app.state.config.DOCLING_SERVER_URL,
+                                    PDF_EXTRACT_IMAGES=False,
+                                    DOCUMENT_INTELLIGENCE_ENDPOINT=request.app.state.config.DOCUMENT_INTELLIGENCE_ENDPOINT,
+                                    DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
+                                    MISTRAL_OCR_API_KEY=request.app.state.config.MISTRAL_OCR_API_KEY,
+                                )
+                                _t1 = time.time()
+                                docs = loader_noimg.load(
+                                    file.filename, file.meta.get("content_type"), file_path
+                                )
+                                _dt2 = time.time() - _t1
+                                log.info(
+                                    f"[EXTRACTION] Fallback PDF sans images OK: filename={file.filename} | docs={len(docs)} | duration={_dt2:.2f}s"
+                                )
+                            except Exception as _ex2:
+                                log.error(
+                                    f"[EXTRACTION] Fallback PDF sans images échoué: filename={file.filename} | erreur={str(_ex2)}"
+                                )
+                                raise
+                        else:
+                            raise
+                    else:
+                        raise
 
                 docs = [
                     Document(

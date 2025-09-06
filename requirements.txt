@@ -32,6 +32,9 @@ magic-filter>=0.1.2
 python-docx>=1.1.0
 openpyxl>=3.1.0
 xlrd>=2.0.1
+odfdo>=3.16.4,<4.0
+defusedxml>=0.7.1
+odfpy>=1.4.1,<2.0
 
 # Enhanced OCR capabilities
 pytesseract>=0.3.10

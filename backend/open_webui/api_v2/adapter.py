@@ -53,6 +53,10 @@ from .models import (
 
 log = logging.getLogger(__name__)
 
+# Limits for JSON auto-repair safeguards (tunable via env if needed)
+JSON_REPAIR_MAX_CHARS = int(os.getenv("API_V2_JSON_REPAIR_MAX_CHARS", "5000000"))  # 5M chars
+JSON_AUTOREPAIR_TOTAL = 0
+
 
 def calculate_adaptive_timeout(file_size_bytes: int) -> float:
     """
@@ -225,6 +229,19 @@ def validate_and_fix_json_response(response_content: str, filename: str = "unkno
     Returns:
         Tuple of (parsed_json_data, is_valid)
     """
+    # Size guard: avoid heavy operations on massive payloads
+    content_len = len(response_content or "")
+    if content_len > JSON_REPAIR_MAX_CHARS:
+        log.warning(
+            f"⚠️ JSON repair skipped for {filename}: size={content_len} > max={JSON_REPAIR_MAX_CHARS}"
+        )
+        try:
+            data = json.loads(response_content)
+            return data, True
+        except Exception as e:
+            log.error(f"❌ JSON parse failed (repair skipped due to size) for {filename}: {e}")
+            return {}, False
+
     # Check for markdown corruption patterns BEFORE parsing
     if "**" in response_content:
         log.info(f"🔧 Detected markdown corruption patterns in {filename}, applying repair first")
@@ -253,13 +270,19 @@ def validate_and_fix_json_response(response_content: str, filename: str = "unkno
     except json.JSONDecodeError as e:
         log.warning(f"❌ JSON parse error for {filename}: {e}")
         
-        # Attempt automatic repair
+        # Attempt automatic repair (guarded)
         try:
             log.info(f"🔧 Attempting automatic JSON repair for {filename}")
             fixed_content = repair_common_json_errors(response_content)
-            
+
             json_data = json.loads(fixed_content)
             log.info(f"✅ JSON auto-repair successful for {filename}")
+            try:
+                global JSON_AUTOREPAIR_TOTAL
+                JSON_AUTOREPAIR_TOTAL += 1
+                log.info(f"🧮 json_autorepair_total={JSON_AUTOREPAIR_TOTAL}")
+            except Exception:
+                pass
             
             # Basic structure validation
             required_fields = ["resume", "security", "rgpd", "finance", "legal"]
@@ -327,22 +350,32 @@ class OpenWebUIAdapter:
             HTTPException: If upload fails or file is too large
         """
         try:
-            # Check file size
+            # Check file size and compute checksum in streaming to avoid memory blowups
             max_file_size = max_size or API_V2_MAX_FILE_SIZE.value
-            file_size = 0
-            
-            # Read file content to get size and calculate checksum
-            content = await file.read()
-            file_size = len(content)
-            
-            if file_size > max_file_size:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File too large. Maximum size: {max_file_size / (1024*1024):.1f}MB"
-                )
-            
-            # Calculate SHA-256 checksum for deduplication
-            file_hash = hashlib.sha256(content).hexdigest()
+            sha256 = hashlib.sha256()
+            total = 0
+
+            # Reset pointer and stream-read
+            await file.seek(0)
+            chunk = await file.read(1024 * 1024)
+            while chunk:
+                total += len(chunk)
+                if total > max_file_size:
+                    log.warning(
+                        f"[UPLOAD] Fichier trop volumineux: name={file.filename} | size={total}B > max={max_file_size}B | content_type={file.content_type}"
+                    )
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Maximum size: {max_file_size / (1024*1024):.1f}MB",
+                    )
+                sha256.update(chunk)
+                chunk = await file.read(1024 * 1024)
+
+            file_size = total
+            file_hash = sha256.hexdigest()
+            log.info(
+                f"[UPLOAD] Réception fichier: name={file.filename} | size={file_size}B | content_type={file.content_type} | checksum={file_hash[:12]}…"
+            )
             
             # Check if file with same content already exists (with timeout protection)
             try:
@@ -393,6 +426,9 @@ class OpenWebUIAdapter:
             )
             
             file_item = Files.insert_new_file(user.id, file_form)
+            log.info(
+                f"[UPLOAD] Persisté: file_id={file_id} | path={file_path} | meta.content_type={proposed_meta.get('content_type')} | meta.size={proposed_meta.get('size')}"
+            )
             
             return UploadFileInfo(
                 filename=file.filename,
@@ -640,6 +676,30 @@ class OpenWebUIAdapter:
                             }
                     else:
                         log.warning("⚠️ No extracted content found; will rely on RAG")
+                        # Early stop for empty/insufficient content to provide a clearer error
+                        MIN_CHARS = int(os.getenv("API_V2_MIN_CONTENT_CHARS", "20"))
+                        if file_size == 0 or MIN_CHARS > 0:
+                            log.error(
+                                f"❌ Empty or insufficient content for {file_info.filename}: size={file_size}B, extracted_chars={len(extracted_text)} (<{MIN_CHARS})"
+                            )
+                            # Mark task as failed with explicit message
+                            self.update_task_status(
+                                task_id,
+                                status=TaskStatus.FAILED.value,
+                                error=(
+                                    f"Document vide ou contenu insuffisant (<{MIN_CHARS} caractères). "
+                                    f"Fichier='{file_info.filename}', taille={file_size}B."
+                                ),
+                                error_type=ErrorType.PROCESSING_ERROR.value,
+                            )
+                            # Abort processing cleanly
+                            await self._cleanup_task_memory(task_id)
+                            return {
+                                "status": "failed",
+                                "error": "empty_or_insufficient_content",
+                                "file": file_info.filename,
+                                "min_chars": MIN_CHARS,
+                            }
                 except Exception as content_err:
                     log.warning(f"⚠️ Content extraction failed: {content_err}")
                     

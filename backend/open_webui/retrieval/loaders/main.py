@@ -2,6 +2,7 @@ import requests
 import logging
 import ftfy
 import sys
+import time
 
 from langchain_community.document_loaders import (
     AzureAIDocumentIntelligenceLoader,
@@ -23,6 +24,7 @@ from langchain_community.document_loaders import (
 from langchain_core.documents import Document
 
 from open_webui.retrieval.loaders.mistral import MistralLoader
+from open_webui.retrieval.loaders.odt_loader import OdtNativeLoader, ODT_MIME
 
 from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL
 
@@ -92,6 +94,12 @@ class TikaLoader:
         self.mime_type = mime_type
 
     def load(self) -> list[Document]:
+        """Extrait le texte via Apache Tika avec logs détaillés.
+
+        Ajoute des métriques de timing et des informations de contexte pour
+        faciliter le diagnostic des échecs d'extraction.
+        """
+        start_ts = time.perf_counter()
         with open(self.file_path, "rb") as f:
             data = f.read()
 
@@ -107,17 +115,27 @@ class TikaLoader:
 
         r = requests.put(endpoint, data=data, headers=headers)
 
+        duration = time.perf_counter() - start_ts
         if r.ok:
-            raw_metadata = r.json()
+            try:
+                raw_metadata = r.json()
+            except Exception:
+                raw_metadata = {}
             text = raw_metadata.get("X-TIKA:content", "<No text content found>").strip()
 
             if "Content-Type" in raw_metadata:
                 headers["Content-Type"] = raw_metadata["Content-Type"]
 
-            log.debug("Tika extracted text: %s", text)
+            log.info(
+                f"[EXTRACTION] Tika: status=ok | bytes={len(data)} | mime={self.mime_type or headers.get('Content-Type','unknown')} | duration={duration:.2f}s | chars={len(text)}"
+            )
 
             return [Document(page_content=text, metadata=headers)]
         else:
+            preview = (r.text or "")[:300]
+            log.error(
+                f"[EXTRACTION] Tika: status=error | code={r.status_code} | reason={r.reason} | duration={duration:.2f}s | preview={preview}"
+            )
             raise Exception(f"Error calling Tika: {r.reason}")
 
 
@@ -128,6 +146,11 @@ class DoclingLoader:
         self.mime_type = mime_type
 
     def load(self) -> list[Document]:
+        """Extrait le texte via Docling avec logs détaillés et métriques.
+
+        Retourne un Document avec le contenu markdown lorsque possible.
+        """
+        start_ts = time.perf_counter()
         with open(self.file_path, "rb") as f:
             files = {
                 "files": (
@@ -145,14 +168,20 @@ class DoclingLoader:
             endpoint = f"{self.url}/v1alpha/convert/file"
             r = requests.post(endpoint, files=files, data=params)
 
+        duration = time.perf_counter() - start_ts
         if r.ok:
-            result = r.json()
+            try:
+                result = r.json()
+            except Exception:
+                result = {}
             document_data = result.get("document", {})
             text = document_data.get("md_content", "<No text content found>")
 
             metadata = {"Content-Type": self.mime_type} if self.mime_type else {}
 
-            log.debug("Docling extracted text: %s", text)
+            log.info(
+                f"[EXTRACTION] Docling: status=ok | mime={self.mime_type or 'unknown'} | duration={duration:.2f}s | chars={len(text)}"
+            )
 
             return [Document(page_content=text, metadata=metadata)]
         else:
@@ -164,6 +193,9 @@ class DoclingLoader:
                         error_msg += f" - {error_data['detail']}"
                 except Exception:
                     error_msg += f" - {r.text}"
+            log.error(
+                f"[EXTRACTION] Docling: status=error | code={r.status_code} | reason={r.reason} | duration={duration:.2f}s | detail={(r.text or '')[:300]}"
+            )
             raise Exception(f"Error calling Docling: {error_msg}")
 
 
@@ -176,6 +208,9 @@ class Loader:
         self, filename: str, file_content_type: str, file_path: str
     ) -> list[Document]:
         loader = self._get_loader(filename, file_content_type, file_path)
+        log.info(
+            f"[EXTRACTION] Loader sélectionné: {loader.__class__.__name__} | engine={self.engine or 'auto'} | filename={filename} | content_type={file_content_type}"
+        )
         docs = loader.load()
 
         return [
@@ -192,6 +227,24 @@ class Loader:
 
     def _get_loader(self, filename: str, file_content_type: str, file_path: str):
         file_ext = filename.split(".")[-1].lower()
+
+        # Support explicite ODT (OpenDocument)
+        if file_ext == "odt" or (file_content_type and file_content_type.startswith("application/vnd.oasis.opendocument")):
+            # Priorité à l'engine explicitement demandé (comportement existant conservé)
+            if self.engine == "tika" and self.kwargs.get("TIKA_SERVER_URL"):
+                return TikaLoader(
+                    url=self.kwargs.get("TIKA_SERVER_URL"),
+                    file_path=file_path,
+                    mime_type=file_content_type or "application/vnd.oasis.opendocument.text",
+                )
+            if self.engine == "docling" and self.kwargs.get("DOCLING_SERVER_URL"):
+                return DoclingLoader(
+                    url=self.kwargs.get("DOCLING_SERVER_URL"),
+                    file_path=file_path,
+                    mime_type=file_content_type or "application/vnd.oasis.opendocument.text",
+                )
+            # Mode auto: ODT natif par défaut (odfdo→odfpy→zip+xml)
+            return OdtNativeLoader(file_path)
 
         if self.engine == "tika" and self.kwargs.get("TIKA_SERVER_URL"):
             if self._is_text_file(file_ext, file_content_type):
@@ -241,6 +294,13 @@ class Loader:
             loader = MistralLoader(
                 api_key=self.kwargs.get("MISTRAL_OCR_API_KEY"), file_path=file_path
             )
+        # ODT natif (auto/fallback), en conservant la priorité admin pour Tika/Docling ci-dessus
+        elif (
+            file_ext == "odt"
+            or (file_content_type and file_content_type.startswith("application/vnd.oasis.opendocument"))
+            or file_content_type == ODT_MIME
+        ):
+            loader = OdtNativeLoader(file_path)
         else:
             if file_ext == "doc" or file_content_type == "application/msword":
                 # Support du format DOC legacy via Unstructured
@@ -283,10 +343,20 @@ class Loader:
                 loader = TextLoader(file_path, autodetect_encoding=True)
             else:
                 # Gestion explicite des formats non supportés
-                if file_ext in ["png", "jpg", "jpeg", "gif", "bmp", "tiff"]:
-                    raise ValueError(f"Image format '{file_ext}' requires OCR engine (Tika/Docling/Document Intelligence)")
+                if file_ext in ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "webp"]:
+                    log.warning(
+                        f"[EXTRACTION] Format image détecté sans OCR: ext={file_ext} | content_type={file_content_type}"
+                    )
+                    raise ValueError(
+                        f"Image format '{file_ext}' requires OCR engine (Tika/Docling/Document Intelligence)"
+                    )
                 elif file_ext in ["mp4", "avi", "mov", "mp3", "wav"]:
-                    raise ValueError(f"Media format '{file_ext}' not supported for text extraction")
+                    log.warning(
+                        f"[EXTRACTION] Format média non supporté: ext={file_ext} | content_type={file_content_type}"
+                    )
+                    raise ValueError(
+                        f"Media format '{file_ext}' not supported for text extraction"
+                    )
                 else:
                     # Fallback vers TextLoader pour formats texte inconnus
                     loader = TextLoader(file_path, autodetect_encoding=True)

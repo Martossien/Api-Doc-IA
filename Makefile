@@ -1,33 +1,16 @@
+.PHONY: test smoke
 
-ifneq ($(shell which docker-compose 2>/dev/null),)
-    DOCKER_COMPOSE := docker-compose
-else
-    DOCKER_COMPOSE := docker compose
-endif
+WEBUI_URL ?= http://localhost:8080
+TOKEN ?=
 
-install:
-	$(DOCKER_COMPOSE) up -d
+smoke: test/websearch_ddgs_smoke.sh
+	WEBUI_URL=$(WEBUI_URL) TOKEN=$(TOKEN) bash test/websearch_ddgs_smoke.sh
 
-remove:
-	@chmod +x confirm_remove.sh
-	@./confirm_remove.sh
+fallback: test/websearch_fallback_duckduckgo_only.sh
+	WEBUI_URL=$(WEBUI_URL) TOKEN=$(TOKEN) bash test/websearch_fallback_duckduckgo_only.sh
 
-start:
-	$(DOCKER_COMPOSE) start
-startAndBuild: 
-	$(DOCKER_COMPOSE) up -d --build
+fullfetch: test/websearch_fullfetch.sh
+	WEBUI_URL=$(WEBUI_URL) TOKEN=$(TOKEN) bash test/websearch_fullfetch.sh
 
-stop:
-	$(DOCKER_COMPOSE) stop
-
-update:
-	# Calls the LLM update script
-	chmod +x update_ollama_models.sh
-	@./update_ollama_models.sh
-	@git pull
-	$(DOCKER_COMPOSE) down
-	# Make sure the ollama-webui container is stopped before rebuilding
-	@docker stop open-webui || true
-	$(DOCKER_COMPOSE) up --build -d
-	$(DOCKER_COMPOSE) start
+test: smoke
 

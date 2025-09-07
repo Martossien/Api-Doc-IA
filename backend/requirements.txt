@@ -148,3 +148,6 @@ opentelemetry-instrumentation-logging==0.52b1
 opentelemetry-instrumentation-httpx==0.52b1
 opentelemetry-instrumentation-aiohttp-client==0.52b1
 defusedxml>=0.7.1
+
+## internet search
+ddgs

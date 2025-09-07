@@ -1,0 +1,108 @@
+--- backups/tools/llm_web_search.backup-atext-20250907-122600.py	2025-09-07 12:26:00.028632113 +0200
++++ backups/tools/llm_web_search.patched-atext-20250907-122600.py	2025-09-07 12:26:00.028803752 +0200
+@@ -136,13 +136,11 @@
+     ) -> list[dict[str, str]]:
+         result = await self._loop.run_in_executor(
+             self._executor,
+-            super().text,
+-            keywords,
+-            region,
+-            safesearch,
+-            timelimit,
+-            backend,
+-            max_results,
++            (lambda: super().text(
++                keywords,
++                region=region, safesearch=safesearch, timelimit=timelimit,
++                backend=backend, max_results=max_results
++            ))
+         )
+         return result
+ 
+--- backups/tools/llm_web_search.backup-superfix-20250907-123040.py	2025-09-07 12:30:40.261029093 +0200
++++ backups/tools/llm_web_search.patched-superfix-20250907-123040.py	2025-09-07 12:30:40.261197593 +0200
+@@ -136,7 +136,7 @@
+     ) -> list[dict[str, str]]:
+         result = await self._loop.run_in_executor(
+             self._executor,
+-            (lambda: super().text(
++            (lambda: super(AsyncDDGS, self).text(
+                 keywords,
+                 region=region, safesearch=safesearch, timelimit=timelimit,
+                 backend=backend, max_results=max_results
+--- backups/tools/llm_web_search.backup-duckhtml-20250907-125047.py	2025-09-07 12:50:47.932883733 +0200
++++ backups/tools/llm_web_search.patched-duckhtml-20250907-125047.py	2025-09-07 12:50:47.933063122 +0200
+@@ -174,31 +174,22 @@
+                     )
+ 
+             # Extract results with regex
+-            titles = re.findall(
+-                r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>',
+-                response_text,
+-                re.DOTALL,
+-            )
+-            urls = re.findall(
+-                r'<a[^>]*class="[^"]*result__url[^"]*"[^>]*>(.*?)</a>',
+-                response_text,
+-                re.DOTALL,
+-            )
+-            snippets = re.findall(
+-                r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
+-                response_text,
+-                re.DOTALL,
+-            )
++                        # Extract links (href) and titles from result__a anchors
++            link_title_matches = re.findall(
++                r'<a[^>]*class=\"[^\"]*result__a[^\"]*\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>',
++                response_text, re.DOTALL)
++            # Extract snippets if available
++            snippet_matches = re.findall(
++                r'<a[^>]*class=\"[^\"]*result__snippet[^\"]*\"[^>]*>(.*?)</a>',
++                response_text, re.DOTALL)
+ 
+             result_dicts = []
+-            for i in range(min(len(titles), len(urls), len(snippets), max_results)):
+-                url = f"https://{urls[i].strip()}"
+-                title = re.sub(r"<[^>]+>", "", titles[i]).strip()
++            for idx, (href, title_html) in enumerate(link_title_matches[:max_results]):
++                title = re.sub(r'<[^>]+>', '', title_html).strip()
+                 title = html.unescape(title)
+-                snippet = (
+-                    html.unescape(snippets[i]).replace("<b>", "").replace("</b>", "")
+-                )
+-                result_dicts.append({"href": url, "title": title, "body": snippet})
++                snippet = html.unescape(snippet_matches[idx]) if idx < len(snippet_matches) else ''
++                snippet = snippet.replace('<b>', '').replace('</b>', '')
++                result_dicts.append({'href': href, 'title': title, 'body': snippet})
+             return result_dicts
+ 
+         except Exception as e:
+--- backups/tools/llm_web_search.backup-proxyfix-20250907-125618.py	2025-09-07 12:56:18.230794663 +0200
++++ backups/tools/llm_web_search.patched-proxyfix-20250907-125618.py	2025-09-07 12:56:18.231499601 +0200
+@@ -155,12 +155,13 @@
+ 
+             async with aiohttp.ClientSession(
+                 headers=headers,
+-                timeout=aiohttp.ClientTimeout(timeout),
++                timeout=aiohttp.ClientTimeout(timeout,
++                trust_env=True),
+                 max_field_size=65536,
+                 proxy=self.proxy,
+             ) as session:
+                 try:
+-                    response = await session.get(search_url)
++                    response = await session.get(search_url, proxy=self.proxy)
+                     response.raise_for_status()
+                     response_text = await response.text()
+                 except TimeoutError:
+--- backups/tools/llm_web_search.backup-splitfix-20250907-130136.py	2025-09-07 13:01:36.592037010 +0200
++++ backups/tools/llm_web_search.patched-splitfix-20250907-130136.py	2025-09-07 13:01:36.592205379 +0200
+@@ -1051,7 +1051,7 @@
+             splits = (
+                 ([_splits[i] + _splits[i + 1] for i in range(0, len(_splits) - 1, 2)])
+                 if keep_separator == "end"
+-                else ([_splits[i] + _splits[i + 1] for i in range(1, len(_splits), 2)])
++                else ([_splits[i] + _splits[i + 1] for i in range(1, len(_splits) - 1, 2)])
+             )
+             if len(_splits) % 2 == 0:
+                 splits += _splits[-1:]

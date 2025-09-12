@@ -191,6 +191,16 @@ def convert_messages_openai_to_ollama(messages: list[dict]) -> list[dict]:
             if images:
                 new_message["images"] = images
 
+        # 🖼️ VISION FIX CRITIQUE: Préserver le champ 'images' direct (format Ollama natif)
+        # Notre implémentation API v2 utilise le format Ollama direct: messages[0]["images"] = [base64]
+        # Cette préservation évite la perte lors de la conversion OpenAI → Ollama
+        if "images" in message and message["images"]:
+            new_message["images"] = message["images"]
+            # Log pour debugging
+            import logging
+            log = logging.getLogger(__name__)
+            log.info(f"🔧 PAYLOAD FIX: Préservé {len(message['images'])} image(s) format Ollama direct")
+
         # Append the new formatted message to the result
         ollama_messages.append(new_message)
 

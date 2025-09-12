@@ -1114,7 +1114,17 @@ def process_file(
                     except Exception:
                         _ext = ""
                     if _ext == "pdf" and request.app.state.config.PDF_EXTRACT_IMAGES:
-                        if "Cannot handle this data type" in str(_ex) or "PIL" in str(_ex):
+                        # 🔧 EXTRACTION PDF ROBUSTE: Fallback étendu pour images corrompues
+                        error_indicators = [
+                            "Cannot handle this data type",
+                            "PIL", 
+                            "cannot reshape array",  # Notre cas spécifique
+                            "ValueError: cannot reshape",
+                            "reshape array of size",
+                            "IndexError",
+                            "Image extraction failed"
+                        ]
+                        if any(indicator in str(_ex) for indicator in error_indicators):
                             try:
                                 log.warning("[EXTRACTION] Fallback PDF sans extract_images pour %s", file.filename)
                                 loader_noimg = Loader(

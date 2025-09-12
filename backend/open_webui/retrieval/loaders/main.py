@@ -264,6 +264,176 @@ class Loader:
         return file_ext in known_source_ext or (
             file_content_type and file_content_type.find("text/") >= 0
         )
+    
+    def _get_pdf_loader_robust(self, file_path: str, file_content_type: str):
+        """
+        Extraction PDF robuste avec stratégies de fallback multiples.
+        
+        Cette méthode implémente une approche en cascade pour extraire le contenu des PDF,
+        en privilégiant l'extraction d'images quand possible, mais en fallback vers
+        l'extraction texte uniquement si les images sont corrompues.
+        
+        Stratégies (dans l'ordre) :
+        1. PyPDFLoader avec images (si configuré)
+        2. PyPDFLoader sans images (fallback si images corrompues)
+        3. Alternative pymupdf (si disponible)
+        4. Alternative pdfplumber (si disponible)  
+        5. Emergency text-only extraction
+        
+        Args:
+            file_path: Chemin vers le fichier PDF
+            file_content_type: Type MIME du fichier
+            
+        Returns:
+            Loader approprié avec stratégie de fallback intégrée
+        """
+        
+        class RobustPdfLoader:
+            """Wrapper qui implémente les stratégies de fallback PDF."""
+            
+            def __init__(self, file_path: str, extract_images_config: bool, engine_config: dict):
+                self.file_path = file_path
+                self.extract_images_config = extract_images_config
+                self.engine_config = engine_config
+                
+            def load(self):
+                """Méthode principale d'extraction avec stratégies de fallback."""
+                strategies = [
+                    ('pypdf_with_images', self._try_pypdf_with_images),
+                    ('pypdf_text_only', self._try_pypdf_text_only),
+                    ('pymupdf_fallback', self._try_pymupdf),
+                    ('pdfplumber_fallback', self._try_pdfplumber),
+                    ('emergency_text_only', self._try_emergency_text)
+                ]
+                
+                last_error = None
+                for strategy_name, strategy_func in strategies:
+                    try:
+                        log.info(f"🔄 EXTRACTION PDF: Tentative {strategy_name} pour {self.file_path}")
+                        start_time = time.time()
+                        docs = strategy_func()
+                        duration = time.time() - start_time
+                        
+                        if docs and len(docs) > 0:
+                            total_chars = sum(len(doc.page_content) for doc in docs)
+                            log.info(f"✅ EXTRACTION PDF RÉUSSIE: {strategy_name} | durée={duration:.2f}s | pages={len(docs)} | chars={total_chars}")
+                            
+                            # Ajouter métadonnées sur la stratégie utilisée
+                            for doc in docs:
+                                if not hasattr(doc, 'metadata'):
+                                    doc.metadata = {}
+                                doc.metadata['extraction_strategy'] = strategy_name
+                                doc.metadata['extraction_duration'] = duration
+                                doc.metadata['fallback_applied'] = strategy_name != 'pypdf_with_images'
+                            
+                            return docs
+                        else:
+                            log.warning(f"⚠️ EXTRACTION PDF VIDE: {strategy_name} - aucun contenu récupéré")
+                            
+                    except Exception as e:
+                        last_error = e
+                        log.warning(f"⚠️ EXTRACTION PDF ÉCHEC: {strategy_name} - {str(e)[:200]}")
+                        # On continue avec la stratégie suivante
+                        continue
+                
+                # Si toutes les stratégies ont échoué
+                log.error(f"❌ EXTRACTION PDF: Toutes les stratégies ont échoué pour {self.file_path}")
+                log.error(f"   Dernière erreur: {last_error}")
+                raise Exception(f"PDF extraction failed with all strategies. Last error: {last_error}")
+                
+            def _try_pypdf_with_images(self):
+                """Stratégie 1: PyPDFLoader avec extraction d'images (configuration standard)."""
+                if not self.extract_images_config:
+                    # Si les images ne sont pas configurées, passer directement à la stratégie suivante
+                    raise Exception("Images extraction not configured, skipping")
+                return PyPDFLoader(self.file_path, extract_images=True).load()
+            
+            def _try_pypdf_text_only(self):
+                """Stratégie 2: PyPDFLoader sans extraction d'images (fallback principal)."""
+                return PyPDFLoader(self.file_path, extract_images=False).load()
+            
+            def _try_pymupdf(self):
+                """Stratégie 3: Alternative avec pymupdf/fitz si disponible."""
+                try:
+                    import fitz  # PyMuPDF
+                    from langchain_core.documents import Document
+                    
+                    docs = []
+                    doc = fitz.open(self.file_path)
+                    for page_num in range(len(doc)):
+                        page = doc.load_page(page_num)
+                        text = page.get_text()
+                        if text.strip():  # Ignorer les pages vides
+                            docs.append(Document(
+                                page_content=text,
+                                metadata={
+                                    "source": self.file_path,
+                                    "page": page_num + 1
+                                }
+                            ))
+                    doc.close()
+                    return docs
+                except ImportError:
+                    raise Exception("pymupdf not available")
+            
+            def _try_pdfplumber(self):
+                """Stratégie 4: Alternative avec pdfplumber si disponible."""
+                try:
+                    import pdfplumber
+                    from langchain_core.documents import Document
+                    
+                    docs = []
+                    with pdfplumber.open(self.file_path) as pdf:
+                        for page_num, page in enumerate(pdf.pages):
+                            text = page.extract_text()
+                            if text and text.strip():  # Ignorer les pages vides
+                                docs.append(Document(
+                                    page_content=text,
+                                    metadata={
+                                        "source": self.file_path,
+                                        "page": page_num + 1
+                                    }
+                                ))
+                    return docs
+                except ImportError:
+                    raise Exception("pdfplumber not available")
+            
+            def _try_emergency_text(self):
+                """Stratégie 5: Extraction d'urgence avec pypdf de base (sans images, minimal)."""
+                try:
+                    import pypdf
+                    from langchain_core.documents import Document
+                    
+                    docs = []
+                    with open(self.file_path, 'rb') as file:
+                        pdf_reader = pypdf.PdfReader(file)
+                        for page_num, page in enumerate(pdf_reader.pages):
+                            try:
+                                text = page.extract_text()
+                                if text and text.strip():
+                                    docs.append(Document(
+                                        page_content=text,
+                                        metadata={
+                                            "source": self.file_path,
+                                            "page": page_num + 1
+                                        }
+                                    ))
+                            except Exception as page_error:
+                                log.warning(f"Page {page_num + 1} extraction failed: {page_error}")
+                                continue  # Ignorer cette page mais continuer avec les autres
+                    return docs
+                except ImportError:
+                    raise Exception("pypdf not available for emergency extraction")
+        
+        # Configuration de l'extraction d'images
+        extract_images = self.kwargs.get("PDF_EXTRACT_IMAGES", False)
+        
+        # Créer et retourner le loader robuste
+        return RobustPdfLoader(
+            file_path=file_path, 
+            extract_images_config=extract_images,
+            engine_config=self.kwargs
+        )
 
     def _get_loader(self, filename: str, file_content_type: str, file_path: str):
         file_ext = filename.split(".")[-1].lower()
@@ -354,9 +524,8 @@ class Loader:
                 # Support du format DOC legacy via Unstructured
                 loader = UnstructuredWordDocumentLoader(file_path)
             elif file_ext == "pdf":
-                loader = PyPDFLoader(
-                    file_path, extract_images=self.kwargs.get("PDF_EXTRACT_IMAGES")
-                )
+                # 🔧 EXTRACTION PDF ROBUSTE: Stratégies de fallback multiples
+                loader = self._get_pdf_loader_robust(file_path, file_content_type)
             elif file_ext == "csv":
                 loader = CSVLoader(file_path, autodetect_encoding=True)
             elif file_ext == "rst":

@@ -988,6 +988,25 @@ API_V2_ADMIN_CONFIG = PersistentConfig(
     },
 )
 
+# 🖼️ Vision Multimodale - Configuration
+API_V2_VISION_BYPASS = PersistentConfig(
+    "API_V2_VISION_BYPASS",
+    "api_v2.vision_bypass",
+    os.environ.get("API_V2_VISION_BYPASS", "True").lower() == "true",
+)
+
+API_V2_VISION_MODELS = PersistentConfig(
+    "API_V2_VISION_MODELS",
+    "api_v2.vision_models",
+    os.environ.get("API_V2_VISION_MODELS", "vision,llava,gpt-4,claude-3,gemini,gemma3:12b,auto").split(","),
+)
+
+API_V2_MAX_INLINE_CONTEXT_CHARS = PersistentConfig(
+    "API_V2_MAX_INLINE_CONTEXT_CHARS",
+    "api_v2.max_inline_context_chars",
+    int(os.environ.get("API_V2_MAX_INLINE_CONTEXT_CHARS", "0")),  # 0 = illimité
+)
+
 ####################################
 # WEBUI
 ####################################

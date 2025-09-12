@@ -18,7 +18,7 @@ BACKEND_PATH="$PROJECT_ROOT/backend"
 LOG_FILE="$PROJECT_ROOT/api_doc_ia.log"
 PID_FILE="$PROJECT_ROOT/api_doc_ia.pid"
 
-export DATA_DIR=/home/admia/Api-Doc-IA/backend/data
+export DATA_DIR=/home/admin_ia/Api-Doc-IA/backend/data
 
 echo -e "${PURPLE}============================================${NC}"
 echo -e "${PURPLE}🚀 API-DOC-IA STARTUP (FAST MODE)${NC}"

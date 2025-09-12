@@ -1314,7 +1314,24 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 if replace_mode:
                     # Remplacer le dernier message user si présent, sinon en ajouter un
                     if msgs and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "user":
+                        # 🖼️ VISION DEBUG: Logger l'état avant modification
+                        original_images = msgs[-1].get("images")
+                        original_keys = list(msgs[-1].keys())
+                        log.info(f"🔍 VISION DEBUG: Message avant modification")
+                        log.info(f"   - Keys: {original_keys}")
+                        log.info(f"   - Has images: {'images' in msgs[-1]}")
+                        log.info(f"   - Images content: {original_images is not None}")
+                        if original_images:
+                            log.info(f"   - Images count: {len(original_images)}")
+                            log.info(f"   - First image preview: {original_images[0][:50]}..." if original_images else "None")
+                        
+                        # 🖼️ VISION FIX: Préserver le champ 'images' si présent
                         msgs[-1]["content"] = new_content
+                        if original_images:
+                            msgs[-1]["images"] = original_images
+                            log.info(f"🖼️ VISION PRESERVE: Champ images[] préservé ({len(original_images)} images)")
+                        else:
+                            log.info("📝 VISION DEBUG: Aucunes images à préserver dans le message")
                     else:
                         msgs.append({"role": "user", "content": new_content})
                     log.info("🧾 ollama_prompt_mode=replace_last_user")

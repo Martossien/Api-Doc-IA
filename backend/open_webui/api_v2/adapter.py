@@ -58,6 +58,33 @@ JSON_REPAIR_MAX_CHARS = int(os.getenv("API_V2_JSON_REPAIR_MAX_CHARS", "5000000")
 JSON_AUTOREPAIR_TOTAL = 0
 
 
+def is_image_file(filename: str, content_type: str = "") -> bool:
+    """Détecter si le fichier est une image"""
+    if not filename:
+        return False
+    file_ext = filename.lower().split('.')[-1] if '.' in filename else ""
+    image_exts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff']
+    return file_ext in image_exts or (content_type and content_type.startswith('image/'))
+
+
+def is_model_vision_capable(model_id: str) -> bool:
+    """Détecter si un modèle supporte la vision (utilise config dynamique)"""
+    if not model_id:
+        return False
+    
+    # Utiliser la configuration dynamique des modèles vision
+    from open_webui.config import API_V2_VISION_MODELS
+    try:
+        vision_keywords = API_V2_VISION_MODELS.value or ['vision', 'llava', 'gpt-4', 'claude-3', 'gemini', 'gemma3:12b', 'auto']
+        # Nettoyer les mots-clés (supprimer espaces)
+        vision_keywords = [kw.strip().lower() for kw in vision_keywords if kw.strip()]
+        return any(keyword in model_id.lower() for keyword in vision_keywords)
+    except Exception:
+        # Fallback vers mots-clés par défaut en cas d'erreur de config
+        vision_keywords = ['vision', 'llava', 'gpt-4', 'claude-3', 'gemini', 'gemma3:12b', 'auto']
+        return any(keyword in model_id.lower() for keyword in vision_keywords)
+
+
 def calculate_adaptive_timeout(file_size_bytes: int) -> float:
     """
     Calculate adaptive timeout based on file size to reduce timeout failures.
@@ -594,11 +621,35 @@ class OpenWebUIAdapter:
                 }
             }
 
+            # 🖼️ VISION MULTIMODALE: Détecter et encoder les images
+            is_image = is_image_file(file_info.filename, getattr(file_info, 'content_type', ''))
+            vision_capable = is_model_vision_capable(selected_model)
+            
             log.info(f"✅ STEP 1: Prepared form_data for API v1 workflow")
             log.info(f"   - Model: {selected_model}")
             log.info(f"   - File ID: {file_info.file_id}")
             log.info(f"   - Temperature: {temperature} (from DB: {model_db_params.get('temperature', 'N/A')})")
             log.info(f"   - Max tokens: {max_tokens} (from DB num_ctx: {model_db_params.get('num_ctx', 'N/A')})")
+            log.info(f"🔍 VISION: image={is_image}, vision_capable={vision_capable}")
+            
+            # Encoder image en base64 si vision multimodale
+            if is_image and vision_capable:
+                log.info(f"🖼️ ENCODAGE VISION pour {file_info.filename}")
+                try:
+                    import base64
+                    from open_webui.models.files import Files
+                    file_record = Files.get_file_by_id(file_info.file_id)
+                    file_path = file_record.path if file_record else None
+                    
+                    if file_path and os.path.exists(file_path):
+                        with open(file_path, "rb") as f:
+                            img_base64 = base64.b64encode(f.read()).decode('utf-8')
+                        form_data["messages"][0]["images"] = [img_base64]
+                        log.info(f"✅ Image encodée: {len(img_base64)} chars ajoutés au message")
+                    else:
+                        log.error(f"❌ Fichier image introuvable: {file_path}")
+                except Exception as e:
+                    log.error(f"❌ Erreur encodage vision: {e}")
 
             # Update progress
             self.update_task_status(task_id, progress="20.0")
@@ -708,76 +759,160 @@ class OpenWebUIAdapter:
                 log.warning("⚠️ Proceeding without file extraction - will use RAG only")
                 self.update_task_status(task_id, progress="30.0")
             
-            # ✅ STEP 3: Call proven API v1 chat_completion_files_handler()
-            from open_webui.utils.middleware import chat_completion_files_handler
+            # 🖼️ ÉTAPE 3: BYPASS RAG COMPLET POUR IMAGES avec vision-capable models
+            # Reproduction exacte du flux interface web (API v1) qui fonctionne
+            # Vérifier si le bypass vision est activé
+            from open_webui.config import API_V2_VISION_BYPASS
+            vision_bypass_enabled = API_V2_VISION_BYPASS.value
             
-            log.info(f"🚀 STEP 2: Calling chat_completion_files_handler() (API v1 proven function)")
             
-            try:
-                # This is the CRITICAL call - using the proven API v1 function!
-                from open_webui.config import API_V2_TIMEOUT
-                enhanced_form_data, flags = await asyncio.wait_for(
-                    chat_completion_files_handler(request, form_data, user),
-                    timeout=min(API_V2_TIMEOUT.value, 300)  # Max 5 minutes for file processing
-                )
+            if is_image and vision_capable and vision_bypass_enabled:
+                log.info(f"🖼️ BYPASS RAG COMPLET: Image détectée avec modèle vision")
+                log.info(f"   → Direct vers generate_chat_completion (comme interface web)")
+                log.info(f"   → Skip chat_completion_files_handler pour éviter perte du champ images")
                 
-                log.info(f"✅ STEP 2 SUCCESS: chat_completion_files_handler() completed")
-                sources = flags.get('sources', []) or []
+                # Use form_data directly (déjà avec image encodée en base64)
+                enhanced_form_data = form_data.copy()
                 
-                # 🔧 FIX HALLUCINATION: Check extraction success before proceeding
-                extraction_success = flags.get("extraction_success", True)
-                files_processed = flags.get("files_processed", 0)
-                
-                if not extraction_success and files_processed > 0:
-                    log.error(f"❌ Content extraction failed for {files_processed} file(s), stopping processing to prevent hallucination")
-                    log.error(f"   File: {file_info.filename} - Size: {file_info.size} bytes")
-                    log.error(f"   This prevents LLM from inventing content when no file context is available")
-                    
-                    raise Exception(
-                        f"Cannot analyze file '{file_info.filename}': content extraction failed. "
-                        f"This may be due to unsupported format, corrupted file, or processing errors. "
-                        f"Supported formats: PDF, DOCX, PPTX, TXT with proper content structure."
-                    )
-                
-                log.info(f"   - Sources found: {len(sources)}")
-                log.info(f"   - Extraction success: {extraction_success}")
-                # Inject RAG context into the last user message (preserve client JSON instructions)
-                if sources:
-                    MAX_SOURCE_CHARS = 20000
-                    context_parts = []
-                    for s in sources:
-                        file_meta = s.get("source", {})
-                        fid = file_meta.get("id") or file_info.file_id
-                        doc_list = s.get("document") or []
-                        doc_text = "".join(x for x in doc_list if isinstance(x, str))
-                        if len(doc_text) > MAX_SOURCE_CHARS:
-                            doc_text = doc_text[:MAX_SOURCE_CHARS]
-                        context_parts.append(f"<source id=\"{fid}\">{doc_text}</source>")
-                    context_string = "\n".join(context_parts)
-                    msgs = enhanced_form_data.get("messages", [])
-                    # Find last user message
-                    user_idx = None
-                    for i in range(len(msgs)-1, -1, -1):
-                        if msgs[i].get("role") == "user":
-                            user_idx = i
-                            break
-                    if user_idx is None and msgs:
-                        user_idx = len(msgs) - 1
-                    if user_idx is not None:
-                        original = msgs[user_idx].get("content", "")
-                        # Prepend explicit context block, keep client's prompt intact
-                        msgs[user_idx]["content"] = f"[Contexte fourni]\n{context_string}\n\n{original}"
-                        enhanced_form_data["messages"] = msgs
+                # Ajout d'un flag pour traçage
+                enhanced_form_data["metadata"] = enhanced_form_data.get("metadata", {})
+                enhanced_form_data["metadata"]["vision_bypass"] = True
+                enhanced_form_data["metadata"]["bypass_reason"] = "image_with_vision_model"
                 
                 # Update progress
                 self.update_task_status(task_id, progress="60.0")
                 
-            except asyncio.TimeoutError:
-                log.error(f"❌ chat_completion_files_handler() timeout after {min(API_V2_TIMEOUT.value, 300)}s")
-                raise Exception(f"File processing timeout after {min(API_V2_TIMEOUT.value, 300)} seconds")
-            except Exception as handler_error:
-                log.error(f"❌ chat_completion_files_handler() failed: {handler_error}")
-                raise Exception(f"API v1 files handler failed: {handler_error}")
+                # Simuler les flags pour compatibilité avec le reste du code
+                flags = {
+                    "sources": [],
+                    "extraction_success": True,  # Pour les images, c'est un succès 
+                    "files_processed": 1,
+                    "vision_bypass": True
+                }
+                
+                log.info(f"✅ VISION BYPASS: Setup complete, proceeding to LLM")
+                
+            else:
+                # ✅ STEP 3: Call proven API v1 chat_completion_files_handler() (documents normaux)
+                from open_webui.utils.middleware import chat_completion_files_handler
+                
+                log.info(f"🚀 STEP 2: Calling chat_completion_files_handler() (API v1 proven function)")
+                
+                try:
+                    # This is the CRITICAL call - using the proven API v1 function!
+                    from open_webui.config import API_V2_TIMEOUT
+                    enhanced_form_data, flags = await asyncio.wait_for(
+                        chat_completion_files_handler(request, form_data, user),
+                        timeout=min(API_V2_TIMEOUT.value, 300)  # Max 5 minutes for file processing
+                    )
+                    
+                    log.info(f"✅ STEP 2 SUCCESS: chat_completion_files_handler() completed")
+                    sources = flags.get('sources', []) or []
+                    
+                    # 🔧 FIX HALLUCINATION: Check extraction success before proceeding
+                    extraction_success = flags.get("extraction_success", True)
+                    files_processed = flags.get("files_processed", 0)
+                    
+                    if not extraction_success and files_processed > 0:
+                        # 🖼️ FALLBACK OCR pour images avec modèles non-vision
+                        if is_image and not vision_capable:
+                            log.info(f"🔄 VISION → OCR FALLBACK: Image avec modèle non-vision")
+                            log.info(f"   → Modèle {enhanced_form_data.get('model', selected_model)} utilisera OCR")
+                            # Continue le traitement OCR normal
+                        else:
+                            # 🔧 EXTRACTION PDF ROBUSTE: Vérifier si le contenu a été extrait via fallback
+                            # Au lieu d'arrêter complètement, vérifier s'il y a du contenu utilisable
+                            try:
+                                from open_webui.models.files import Files
+                                file_record = Files.get_file_by_id(file_info.file_id)
+                                extracted_content = ""
+                                if file_record and file_record.data:
+                                    extracted_content = file_record.data.get("content", "") or ""
+                                
+                                MIN_CONTENT_CHARS = 50  # Seuil minimum de contenu utilisable
+                                if len(extracted_content.strip()) >= MIN_CONTENT_CHARS:
+                                    log.warning(f"⚠️ EXTRACTION PARTIELLE RÉUSSIE: {len(extracted_content)} chars récupérés via fallback robuste")
+                                    log.warning(f"   → Continuation du traitement avec contenu partiel pour {file_info.filename}")
+                                    # Continuer le traitement avec le contenu extrait
+                                    
+                                    # Mettre à jour les flags pour indiquer un succès partiel
+                                    flags["extraction_success"] = True
+                                    flags["extraction_partial"] = True
+                                    flags["extraction_method"] = "robust_fallback"
+                                    flags["content_chars"] = len(extracted_content)
+                                    
+                                    # Injecter le contenu dans les sources pour le RAG
+                                    if not sources:
+                                        flags["sources"] = [{
+                                            "source": {"id": file_info.file_id, "name": file_info.filename},
+                                            "document": [extracted_content[:15000]]  # Limiter à 15k chars
+                                        }]
+                                        sources = flags["sources"]
+                                        log.info(f"   → Contenu injecté dans les sources RAG: {len(sources)} source(s)")
+                                    
+                                else:
+                                    # Vraiment aucun contenu - maintenir l'erreur mais avec message plus spécifique
+                                    log.error(f"❌ EXTRACTION COMPLÈTEMENT ÉCHOUÉE: {len(extracted_content)} chars < {MIN_CONTENT_CHARS} requis")
+                                    log.error(f"   File: {file_info.filename} - Size: {file_info.size} bytes")
+                                    log.error(f"   Même les stratégies de fallback robuste n'ont pas pu extraire de contenu utilisable")
+                                    
+                                    raise Exception(
+                                        f"Cannot extract any usable content from '{file_info.filename}'. "
+                                        f"File may be completely corrupted, encrypted, or in an unsupported format. "
+                                        f"Extracted only {len(extracted_content)} characters (minimum: {MIN_CONTENT_CHARS})."
+                                    )
+                                    
+                            except Exception as content_check_error:
+                                log.error(f"❌ Content check failed: {content_check_error}")
+                                # En cas d'erreur de vérification, utiliser l'ancien comportement
+                                log.error(f"❌ Content extraction failed for {files_processed} file(s), stopping processing to prevent hallucination")
+                                log.error(f"   File: {file_info.filename} - Size: {file_info.size} bytes")
+                                
+                                raise Exception(
+                                    f"Cannot analyze file '{file_info.filename}': content extraction failed. "
+                                    f"This may be due to unsupported format, corrupted file, or processing errors. "
+                                    f"Supported formats: PDF, DOCX, PPTX, TXT with proper content structure."
+                                )
+                    
+                    log.info(f"   - Sources found: {len(sources)}")
+                    log.info(f"   - Extraction success: {extraction_success}")
+                    # Inject RAG context into the last user message (preserve client JSON instructions)
+                    if sources:
+                        MAX_SOURCE_CHARS = 20000
+                        context_parts = []
+                        for s in sources:
+                            file_meta = s.get("source", {})
+                            fid = file_meta.get("id") or file_info.file_id
+                            doc_list = s.get("document") or []
+                            doc_text = "".join(x for x in doc_list if isinstance(x, str))
+                            if len(doc_text) > MAX_SOURCE_CHARS:
+                                doc_text = doc_text[:MAX_SOURCE_CHARS]
+                            context_parts.append(f"<source id=\"{fid}\">{doc_text}</source>")
+                        context_string = "\n".join(context_parts)
+                        msgs = enhanced_form_data.get("messages", [])
+                        # Find last user message
+                        user_idx = None
+                        for i in range(len(msgs)-1, -1, -1):
+                            if msgs[i].get("role") == "user":
+                                user_idx = i
+                                break
+                        if user_idx is None and msgs:
+                            user_idx = len(msgs) - 1
+                        if user_idx is not None:
+                            original = msgs[user_idx].get("content", "")
+                            # Prepend explicit context block, keep client's prompt intact
+                            msgs[user_idx]["content"] = f"[Contexte fourni]\n{context_string}\n\n{original}"
+                            enhanced_form_data["messages"] = msgs
+                    
+                    # Update progress
+                    self.update_task_status(task_id, progress="60.0")
+                    
+                except asyncio.TimeoutError:
+                    log.error(f"❌ chat_completion_files_handler() timeout after {min(API_V2_TIMEOUT.value, 300)}s")
+                    raise Exception(f"File processing timeout after {min(API_V2_TIMEOUT.value, 300)} seconds")
+                except Exception as handler_error:
+                    log.error(f"❌ chat_completion_files_handler() failed: {handler_error}")
+                    raise Exception(f"API v1 files handler failed: {handler_error}")
             
             # ✅ STEP 4: Get available models for chat completion
             try:
@@ -862,6 +997,22 @@ class OpenWebUIAdapter:
             
             log.info(f"🚀 STEP 3: Calling generate_chat_completion() with enhanced data")
             log.info(f"   - Enhanced messages count: {len(enhanced_form_data.get('messages', []))}")
+            
+            # 🖼️ DEBUG: Vérifier si les images sont présentes dans enhanced_form_data avant l'appel
+            msgs = enhanced_form_data.get('messages', [])
+            for i, msg in enumerate(msgs):
+                if isinstance(msg, dict) and 'images' in msg:
+                    images = msg.get('images', [])
+                    if images:
+                        log.info(f"🔍 DEBUG ADAPTER: Message {i} contient {len(images)} image(s), taille_première={len(images[0]) if images else 0} chars")
+                    else:
+                        log.info(f"🔍 DEBUG ADAPTER: Message {i} contient un champ 'images' vide")
+                else:
+                    log.info(f"🔍 DEBUG ADAPTER: Message {i} ne contient PAS de champ 'images'")
+            
+            if not any(isinstance(msg, dict) and msg.get('images') for msg in msgs):
+                log.error(f"❌ CRITICAL: Aucune image trouvée dans enhanced_form_data avant generate_chat_completion !")
+                log.error(f"   → Le champ images a été perdu quelque part dans le bypass")
             
             # 🔒 Basic token safeguard (simplified)
             current_max_tokens = enhanced_form_data.get("max_tokens", 4000)

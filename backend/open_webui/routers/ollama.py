@@ -1200,6 +1200,19 @@ async def generate_chat_completion(
         bypass_filter = True
 
     metadata = form_data.pop("metadata", None)
+    
+    # 🖼️ DEBUG CRITIQUE: Vérifier form_data AVANT création Pydantic
+    raw_msgs = form_data.get('messages', [])
+    for i, msg in enumerate(raw_msgs):
+        if isinstance(msg, dict) and 'images' in msg:
+            images = msg.get('images', [])
+            if images:
+                log.info(f"🔍 PRE-PYDANTIC: Message {i} contient {len(images)} image(s) avant GenerateChatCompletionForm")
+            else:
+                log.info(f"🔍 PRE-PYDANTIC: Message {i} contient un champ 'images' vide avant GenerateChatCompletionForm")
+        else:
+            log.info(f"🔍 PRE-PYDANTIC: Message {i} ne contient PAS de champ 'images' avant GenerateChatCompletionForm")
+    
     try:
         form_data = GenerateChatCompletionForm(**form_data)
     except Exception as e:
@@ -1212,6 +1225,60 @@ async def generate_chat_completion(
     payload = {**form_data.model_dump(exclude_none=True)}
     if "metadata" in payload:
         del payload["metadata"]
+
+    # 🖼️ FIX CRITIQUE: Préserver explicitement le champ 'images' perdu lors du model_dump()
+    # Le champ images peut être perdu dans la transformation Pydantic, on le restaure
+    original_messages = form_data.messages
+    payload_messages = payload.get("messages", [])
+    
+    # DEBUG: Analyser le contenu des messages originaux
+    for i, original_msg in enumerate(original_messages):
+        log.info(f"🔍 ORIGINAL MSG {i}: type={type(original_msg)}, has_images_attr={hasattr(original_msg, 'images')}")
+        if hasattr(original_msg, 'images'):
+            images_val = getattr(original_msg, 'images', None)
+            log.info(f"   - images value: {images_val}, type: {type(images_val)}, len: {len(images_val) if images_val else 'N/A'}")
+        if hasattr(original_msg, '__dict__'):
+            log.info(f"   - dict keys: {list(original_msg.__dict__.keys())}")
+    
+    images_restored = False
+    for i, (original_msg, payload_msg) in enumerate(zip(original_messages, payload_messages)):
+        original_images = None
+        
+        # Essayer plusieurs façons d'accéder aux images
+        if hasattr(original_msg, 'images') and original_msg.images:
+            original_images = original_msg.images
+        elif hasattr(original_msg, '__dict__') and 'images' in original_msg.__dict__:
+            original_images = original_msg.__dict__['images']
+        elif isinstance(original_msg, dict) and 'images' in original_msg:
+            original_images = original_msg['images']
+        
+        if original_images:
+            # Restaurer les images 
+            if isinstance(payload_msg, dict):
+                payload_msg["images"] = original_images
+                images_restored = True
+                log.info(f"🔧 VISION FIX: Restauré {len(original_images)} image(s) dans message {i}")
+            else:
+                log.warning(f"⚠️ VISION: Cannot restore images to non-dict message {i}")
+        else:
+            log.info(f"🔍 No images found in original message {i}")
+    
+    if images_restored:
+        log.info(f"✅ VISION FIX: Images restaurées dans le payload après model_dump()")
+        # Update payload with fixed messages
+        payload["messages"] = payload_messages
+    
+    # 🖼️ DEBUG: Vérifier si les images sont maintenant dans le payload
+    payload_msgs = payload.get("messages", [])
+    for i, msg in enumerate(payload_msgs):
+        if isinstance(msg, dict) and "images" in msg:
+            images = msg.get("images", [])
+            if images:
+                log.info(f"🔍 DEBUG PAYLOAD: Message {i} contient {len(images)} image(s) dans le payload")
+            else:
+                log.info(f"🔍 DEBUG PAYLOAD: Message {i} contient un champ 'images' vide dans le payload")
+        else:
+            log.info(f"🔍 DEBUG PAYLOAD: Message {i} ne contient PAS de champ 'images' dans le payload")
 
     model_id = payload["model"]
     model_info = Models.get_model_by_id(model_id)
@@ -1273,6 +1340,33 @@ async def generate_chat_completion(
         _head = _last_content[:200] if isinstance(_last_content, str) else ""
         _tail = _last_content[-200:] if isinstance(_last_content, str) and _last_chars > 200 else ( _last_content or "")
         _opts = payload.get("options", {}) or {}
+        
+        # 🖼️ VISION AUDIT: Détecter et auditer les images dans le payload
+        _images_found = False
+        _total_images = 0
+        _images_details = []
+        
+        for i, msg in enumerate(_msgs):
+            if isinstance(msg, dict) and "images" in msg:
+                msg_images = msg.get("images", [])
+                if msg_images and isinstance(msg_images, list):
+                    _images_found = True
+                    _total_images += len(msg_images)
+                    _images_details.append({
+                        "message_index": i,
+                        "role": msg.get("role", "unknown"),
+                        "images_count": len(msg_images),
+                        "first_image_size": len(msg_images[0]) if msg_images else 0
+                    })
+        
+        # 🖼️ Log spécifique pour les images
+        if _images_found:
+            log.info(f"✅ OLLAMA PAYLOAD: Images détectées - {_total_images} image(s) dans {len(_images_details)} message(s)")
+            for detail in _images_details:
+                log.info(f"   - Message {detail['message_index']} ({detail['role']}): {detail['images_count']} image(s), taille_première={detail['first_image_size']} chars")
+        else:
+            log.info(f"❌ OLLAMA PAYLOAD: Aucune image détectée dans les {len(_msgs)} messages")
+        
         # Token budget estimate against Ollama-side num_ctx if present
         try:
             approx_tokens = int((_last_chars or 0) / 4)
@@ -1289,7 +1383,7 @@ async def generate_chat_completion(
         except Exception:
             pass
         log.info(
-            f"🧾 ollama_payload_audit: options={_json.dumps(_opts)}, messages_count={len(_msgs)}, last_message_chars={_last_chars}, last_head={_json.dumps(_head, ensure_ascii=False)}, last_tail={_json.dumps(_tail, ensure_ascii=False)}"
+            f"🧾 ollama_payload_audit: options={_json.dumps(_opts)}, messages_count={len(_msgs)}, last_message_chars={_last_chars}, images_detected={_images_found}, total_images={_total_images}, last_head={_json.dumps(_head, ensure_ascii=False)}, last_tail={_json.dumps(_tail, ensure_ascii=False)}"
         )
     except Exception:
         pass

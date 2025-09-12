@@ -1656,7 +1656,7 @@ print('\\n🎉 Core dependency verification completed!')
       
       # 3) Chemins absolus erronés vers Api-Doc-IA → proposer correction vers REPO_PATH
       echo -e "${BLUE}🔎 Recherche de chemins absolus codés en dur vers Api-Doc-IA...${NC}"
-      MAP_FILE_LIST="$(grep -RIl --exclude-dir='.git' --include='*.sh' '/home/admia/Api-Doc-IA' "$PROJECT_ROOT" 2>/dev/null || true)"
+      MAP_FILE_LIST="$(grep -RIl --exclude-dir='.git' --include='*.sh' '/home/admin_ia/Api-Doc-IA' "$PROJECT_ROOT" 2>/dev/null || true)"
       if [ -z "$MAP_FILE_LIST" ]; then
           # Pattern plus précis
           MAP_FILE_LIST="$(grep -RIl --exclude-dir='.git' --include='*.sh' '/home/[^/][^/]*/Api-Doc-IA' "$PROJECT_ROOT" 2>/dev/null || true)"

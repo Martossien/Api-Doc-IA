@@ -162,6 +162,22 @@ async def generate_chat_completion(
     bypass_filter: bool = False,
 ):
     log.debug(f"generate_chat_completion: {form_data}")
+    
+    # 🖼️ DEBUG: Vérifier la présence d'images dès l'entrée de generate_chat_completion
+    msgs = form_data.get('messages', [])
+    has_images = False
+    for i, msg in enumerate(msgs):
+        if isinstance(msg, dict) and 'images' in msg:
+            images = msg.get('images', [])
+            if images:
+                has_images = True
+                log.info(f"🔍 DEBUG CHAT: Message {i} contient {len(images)} image(s) à l'entrée de generate_chat_completion")
+    
+    if has_images:
+        log.info(f"✅ DEBUG CHAT: Images détectées dans generate_chat_completion - transmission vers routeur...")
+    else:
+        log.info(f"❌ DEBUG CHAT: Aucune image détectée dans generate_chat_completion")
+    
     if BYPASS_MODEL_ACCESS_CONTROL:
         bypass_filter = True
 

@@ -64,6 +64,8 @@ einops==0.8.1
 ftfy==6.2.3
 pypdf==4.3.1
 fpdf2==2.8.2
+pymupdf==1.24.14  # PyMuPDF pour stratégie fallback PDF robuste
+pdfplumber==0.11.4  # Alternative extraction PDF pour fallback
 pymdown-extensions==10.14.2
 docx2txt==0.8
 python-pptx==1.0.0

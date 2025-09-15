@@ -95,7 +95,7 @@ def calculate_adaptive_timeout(file_size_bytes: int) -> float:
     Returns:
         Timeout duration in seconds
     """
-    base_timeout = 30.0
+    base_timeout = 60.0
     
     if file_size_bytes < 100_000:  # < 100KB
         return base_timeout
@@ -649,6 +649,7 @@ class OpenWebUIAdapter:
                     else:
                         log.error(f"❌ Fichier image introuvable: {file_path}")
                 except Exception as e:
+                    from open_webui.models.files import Files
                     log.error(f"❌ Erreur encodage vision: {e}")
 
             # Update progress
@@ -752,6 +753,7 @@ class OpenWebUIAdapter:
                                 "min_chars": MIN_CHARS,
                             }
                 except Exception as content_err:
+                    from open_webui.models.files import Files
                     log.warning(f"⚠️ Content extraction failed: {content_err}")
                     
             except Exception as pf_err:
@@ -863,6 +865,7 @@ class OpenWebUIAdapter:
                                     )
                                     
                             except Exception as content_check_error:
+                                from open_webui.models.files import Files
                                 log.error(f"❌ Content check failed: {content_check_error}")
                                 # En cas d'erreur de vérification, utiliser l'ancien comportement
                                 log.error(f"❌ Content extraction failed for {files_processed} file(s), stopping processing to prevent hallucination")

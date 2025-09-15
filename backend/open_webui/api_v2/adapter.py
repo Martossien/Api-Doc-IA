@@ -233,6 +233,42 @@ def repair_common_json_errors(content: str) -> str:
     # 15. NOUVEAU: Fix double asterisk before arrays: **"key": [ -> "key": [
     content = re.sub(r'\*\*"([^"]+)":\s*\[', r'"\1": [', content)
     
+    # 16. NOUVEAU: Fix délimiteurs ':' manquants - Pattern: "key" "value" -> "key": "value"
+    content = re.sub(r'"([^"]+)"\s+"([^"]*)"', r'"\1": "\2"', content)
+
+    # 17. NOUVEAU: Fix clés cassées dans guillemets - Pattern: "key: value" -> "key": "value"  
+    content = re.sub(r'"([^"]*):([^"]*)"', r'"\1": "\2"', content)
+
+    # 18. NOUVEAU: Fix clés non quotées simples - Pattern: key: -> "key":
+    content = re.sub(r'\b(\w+):\s*(?=["\[\{])', r'"\1": ', content)
+
+    # 19. NOUVEAU: Fix guillemets manquants dans clés - Pattern: key": -> "key":
+    content = re.sub(r'\b(\w+)":\s*', r'"\1": ', content)
+
+    # 20. NOUVEAU: Fix virgules manquantes entre objets - Pattern: }"key" -> },"key"
+    content = re.sub(r'}"([^"]+)":', r'},"\1":', content)
+
+    # 21. NOUVEAU: Fix délimiteurs doubles - Pattern: "key":: -> "key":
+    content = re.sub(r'"([^"]+)"::\s*', r'"\1": ', content)
+
+    # 22. NOUVEAU: Fix espaces dans délimiteurs - Pattern: "key" : -> "key":
+    content = re.sub(r'"([^"]+)"\s*:\s*', r'"\1": ', content)
+
+    # 23. NOUVEAU: Fix guillemets mal fermés avec astérisques multiples - Pattern: "**key****: -> "key":
+    content = re.sub(r'"\*\*([^"*]+)\*\*"\*\*:\s*', r'"\1": ', content)
+
+    # 24. NOUVEAU: Fix caractères d'échappement incorrects avec astérisques - Pattern: "**key**\\": -> "key":
+    content = re.sub(r'"\*\*([^"*]+)\*\*"\\+\s*":\s*', r'"\1": ', content)
+
+    # 25. NOUVEAU: Fix valeurs numériques sans guillemets avec astérisques - Pattern: **80** -> 80
+    content = re.sub(r':\s*\*\*(\d+)\*\*(?=\s*[,}])', r': \1', content)
+
+    # 26. NOUVEAU: Fix clés avec astérisques et deux points multiples - Pattern: "**key**":: -> "key":
+    content = re.sub(r'"\*\*([^"*]+)\*\*":+\s*', r'"\1": ', content)
+
+    # 27. NOUVEAU: Fix valeurs avec astérisques en fin de chaîne - Pattern: "value**" -> "value"
+    content = re.sub(r'"([^"]*)\*\*"(?=\s*[,}])', r'"\1"', content)
+
     # Fix trailing commas in objects and arrays
     content = re.sub(r',(\s*[}\]])', r'\1', content)
     

@@ -38,31 +38,30 @@ check_port_available() {
     fi
 }
 
+# Gather all related PIDs (deduplicated)
+get_all_pids() {
+    local pids
+    mapfile -t pids < <(
+        {
+            pgrep -f "uvicorn.*open_webui" 2>/dev/null || true
+            pgrep -f "python.*$PROJECT_ROOT" 2>/dev/null || true
+            pgrep -f "$LOG_FILE" 2>/dev/null || true
+        } | awk 'NF' | grep -E '^[0-9]+$' | sort -u
+    )
+    printf '%s\n' "${pids[@]}"
+}
+
 # Function to check for remaining processes
 check_remaining_processes() {
     echo -e "${BLUE}🔍 Checking for remaining API-DOC-IA processes...${NC}"
     
-    # Check for uvicorn processes related to open_webui
-    UVICORN_PIDS=$(pgrep -f "uvicorn.*open_webui" 2>/dev/null || true)
+    mapfile -t ALL_PIDS < <(get_all_pids)
     
-    # Check for any python processes from our project
-    PYTHON_PIDS=$(pgrep -f "python.*$PROJECT_ROOT" 2>/dev/null || true)
-    
-    # Check for any processes with our log file
-    LOG_PIDS=$(pgrep -f "$LOG_FILE" 2>/dev/null || true)
-    
-    # Combine and deduplicate
-    ALL_PIDS=$(echo -e "$UVICORN_PIDS
-$PYTHON_PIDS
-$LOG_PIDS" | grep -v "^$" | sort -u 2>/dev/null || true)
-    
-    if [ -n "$ALL_PIDS" ]; then
+    if [ ${#ALL_PIDS[@]} -gt 0 ]; then
         echo -e "${YELLOW}⚠️ Found remaining processes:${NC}"
-        echo "$ALL_PIDS" | while read pid; do
-            if [ -n "$pid" ]; then
-                CMDLINE=$(ps -p $pid -o args= 2>/dev/null || echo "unknown")
-                echo -e "${BLUE}   PID: $pid - $CMDLINE${NC}"
-            fi
+        for pid in "${ALL_PIDS[@]}"; do
+            CMDLINE=$(ps -p "$pid" -o args= 2>/dev/null || echo "unknown")
+            echo -e "${BLUE}   PID: $pid - $CMDLINE${NC}"
         done
         return 0  # Always return 0 to avoid breaking the script
     else
@@ -75,36 +74,24 @@ $LOG_PIDS" | grep -v "^$" | sort -u 2>/dev/null || true)
 cleanup_all_processes() {
     echo -e "${BLUE}🔍 Searching for all API-DOC-IA related processes...${NC}"
     
-    # Find all processes related to API-Doc-IA
-    UVICORN_PIDS=$(pgrep -f "uvicorn.*open_webui" 2>/dev/null || true)
-    PYTHON_PIDS=$(pgrep -f "python.*$PROJECT_ROOT" 2>/dev/null || true)
-    LOG_PIDS=$(pgrep -f "$LOG_FILE" 2>/dev/null || true)
+    mapfile -t ALL_PIDS < <(get_all_pids)
     
-    # Combine and deduplicate PIDs
-    ALL_PIDS=$(echo -e "$UVICORN_PIDS
-$PYTHON_PIDS
-$LOG_PIDS" | grep -v "^$" | sort -u 2>/dev/null || true)
-    
-    if [ -z "$ALL_PIDS" ]; then
+    if [ ${#ALL_PIDS[@]} -eq 0 ]; then
         echo -e "${GREEN}✅ No API-DOC-IA processes found${NC}"
         return 0
     else
         echo -e "${YELLOW}⚠️ Found running processes:${NC}"
-        echo "$ALL_PIDS" | while read pid; do
-            if [ -n "$pid" ]; then
-                CMDLINE=$(ps -p $pid -o args= 2>/dev/null || echo "unknown")
-                echo -e "${BLUE}   PID: $pid - $CMDLINE${NC}"
-            fi
+        for pid in "${ALL_PIDS[@]}"; do
+            CMDLINE=$(ps -p "$pid" -o args= 2>/dev/null || echo "unknown")
+            echo -e "${BLUE}   PID: $pid - $CMDLINE${NC}"
         done
         
         echo -e "${BLUE}🔧 Stopping all processes...${NC}"
         
         # Send SIGTERM first
-        echo "$ALL_PIDS" | while read pid; do
-            if [ -n "$pid" ]; then
-                echo -e "${BLUE}   Sending SIGTERM to PID: $pid${NC}"
-                kill $pid 2>/dev/null || true
-            fi
+        for pid in "${ALL_PIDS[@]}"; do
+            echo -e "${BLUE}   Sending SIGTERM to PID: $pid${NC}"
+            kill "$pid" 2>/dev/null || true
         done
         
         # Wait a bit for graceful shutdown
@@ -113,10 +100,10 @@ $LOG_PIDS" | grep -v "^$" | sort -u 2>/dev/null || true)
         
         # Check if any processes are still running and send SIGKILL
         STILL_RUNNING=false
-        echo "$ALL_PIDS" | while read pid; do
-            if [ -n "$pid" ] && kill -0 $pid 2>/dev/null; then
+        for pid in "${ALL_PIDS[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
                 echo -e "${YELLOW}⚠️ Force killing PID: $pid${NC}"
-                kill -9 $pid 2>/dev/null || true
+                kill -9 "$pid" 2>/dev/null || true
                 STILL_RUNNING=true
             fi
         done
@@ -129,8 +116,8 @@ $LOG_PIDS" | grep -v "^$" | sort -u 2>/dev/null || true)
         
         # Final verification
         FAILED=false
-        echo "$ALL_PIDS" | while read pid; do
-            if [ -n "$pid" ] && kill -0 $pid 2>/dev/null; then
+        for pid in "${ALL_PIDS[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
                 echo -e "${RED}❌ Failed to stop process: $pid${NC}"
                 FAILED=true
             else

@@ -1,7 +1,5 @@
 #!/bin/bash
 
-export DATA_DIR="$BACKEND_PATH/data"
-
 # =============================================================================
 # 🚀 API-DOC-IA UNIVERSAL STARTUP SCRIPT (SECURE v2)
 # =============================================================================
@@ -24,6 +22,9 @@ BACKEND_PATH="$PROJECT_ROOT/backend"
 LOG_FILE="$PROJECT_ROOT/api_doc_ia.log"
 PID_FILE="$PROJECT_ROOT/api_doc_ia.pid"
 
+# DATA_DIR default must be set after BACKEND_PATH is known.
+export DATA_DIR="${DATA_DIR:-$BACKEND_PATH/data}"
+
 echo -e "${BLUE}============================================${NC}"
 echo -e "${BLUE}🚀 API-DOC-IA STARTUP (SECURE v2)${NC}"
 echo -e "${BLUE}============================================${NC}"
@@ -39,6 +40,7 @@ echo -e "${BLUE}============================================${NC}"
 : "${CUSTOM_SQLITE_VALIDATION_TIMEOUT:=10}"
 : "${SKIP_ENVIRONMENT_DETECTION:=false}"
 : "${FORCE_SYSTEM_SQLITE:=false}"
+: "${SKIP_CHROMA_CHECKS:=false}"
 
 # Internal state variables
 USING_CONDA_ENV=false
@@ -869,9 +871,15 @@ perform_preflight_checks() {
     
     # Check port 8080
     if lsof -t -i:8080 2>/dev/null >/dev/null; then
-        echo -e "${RED}❌ Port 8080 is already in use${NC}"
-        echo -e "${YELLOW}💡 Stop other services or change port in configuration${NC}"
-        return 1
+        echo -e "${YELLOW}⚠️ Port 8080 is in use - attempting cleanup via stop.sh${NC}"
+        if [ -x "$PROJECT_ROOT/stop.sh" ]; then
+            "$PROJECT_ROOT/stop.sh" || true
+        fi
+        if lsof -t -i:8080 2>/dev/null >/dev/null; then
+            echo -e "${RED}❌ Port 8080 is still in use after cleanup${NC}"
+            echo -e "${YELLOW}💡 Stop other services or change port in configuration${NC}"
+            return 1
+        fi
     fi
     
     echo -e "${GREEN}✅ Pre-flight checks passed${NC}"
@@ -955,20 +963,34 @@ start_server_with_monitoring() {
     cd "$PROJECT_ROOT"
     
     # Start server using our local backend code
-    if ! python -m uvicorn open_webui.main:app \
-        --host "$HOST" \
-        --port "$PORT" \
-        --h11-max-incomplete-event-size 65536 \
-        --reload \
-        --reload-dir "$BACKEND_PATH/open_webui" \
-        --log-level "$LOG_LEVEL" 2>&1 | tee -a "$LOG_FILE" &
-    then
-        echo -e "${RED}❌ Failed to start server${NC}"
-        return 1
+    UVICORN_ARGS=(
+        python -m uvicorn open_webui.main:app
+        --host "$HOST"
+        --port "$PORT"
+        --h11-max-incomplete-event-size 65536
+        --log-level "$LOG_LEVEL"
+    )
+    
+    # Use foreground mode under systemd for correct supervision.
+    if [ -n "${SYSTEMD_EXEC_PID:-}" ] || [ "${RUN_MODE:-}" = "service" ]; then
+        echo $$ > "$PID_FILE"
+        echo -e "${GREEN}✅ Server starting in systemd mode (foreground)${NC}"
+        exec "${UVICORN_ARGS[@]}" >> "$LOG_FILE" 2>&1
     fi
+    
+    # Manual/dev mode: enable reload and run in background.
+    UVICORN_ARGS+=(--reload --reload-dir "$BACKEND_PATH/open_webui")
+    "${UVICORN_ARGS[@]}" >> "$LOG_FILE" 2>&1 &
     
     SERVER_PID=$!
     echo $SERVER_PID > "$PID_FILE"
+    
+    # Give the process a moment to fail fast if something is wrong.
+    sleep 1
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo -e "${RED}❌ Failed to start server (process exited early)${NC}"
+        return 1
+    fi
     
     echo -e "${GREEN}✅ Server started (PID: $SERVER_PID)${NC}"
     
@@ -1071,8 +1093,12 @@ main() {
     # Python path configuration
     configure_pythonpath
     
-    # 🚀 PERFORMANCE: ChromaDB pre-check
-    check_chromadb_performance
+    # 🚀 PERFORMANCE: ChromaDB pre-check (optional)
+    if [ "$SKIP_CHROMA_CHECKS" = "true" ]; then
+        echo -e "${YELLOW}⚠️ ChromaDB checks skipped by configuration${NC}"
+    else
+        check_chromadb_performance
+    fi
     
     # SQLite environment loading and validation
     load_sqlite_environment_safely
